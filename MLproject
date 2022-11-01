@@ -1,0 +1,86 @@
+name: rdn_workflow
+
+python_env: python_env.yaml
+
+entry_points:
+  main:
+      parameters:
+        stages: {type: str, default: 'all'}
+      command: "python main.py --stages {stages}"
+
+  etl:
+    parameters:
+      dir_in: {type: str, default: '../original_data/'}
+      dir_out: {type: str, default: '../preprocessed_data/'}
+      tmp_folder: {type: str, default: '../tmp_data/'}
+    command: "python etl.py \
+              --dir_in {dir_in} \
+              --dir_out {dir_out} \
+              --tmp_folder {tmp_folder} "
+  optuna:
+    parameters:
+      dir_in: {type: str, default: '../preprocessed_data/'}
+      seed: {type: str, default: '42'}
+      n_trials: {type: str, default: '10'}
+      countries: {type: str, default: 'Austria'}
+      max_epochs: {type: str, default: '1,10'}
+      n_layers: {type: str, default: '1,3'}
+      l_window: {type: str, default: '24,720'}
+      f_horizon: {type: str, default: '36,48'}
+      l_rate: {type: str, default: '1e-5,1e-1'}
+      activation: {type: str, default: 'ReLU,SiLU'}
+      optimizer_name: {type: str, default: 'Adam,RMSprop,SGD'}
+      batch_size: {type: str, default: '16,32,64,128,256'}
+    command: "python forecasting_model_optuna.py \
+              --dir_in {dir_in} \
+              --seed {seed} \
+              --n_trials {n_trials} \
+              --countries {countries} \
+              --max_epochs {max_epochs} \
+              --n_layers {n_layers} \
+              --l_window {l_window} \
+              --f_horizon {f_horizon} \
+              --l_rate {l_rate} \
+              --activation {activation} \
+              --optimizer_name {optimizer_name} \ 
+              --batch_size {batch_size} "
+  ensemble:
+    parameters:
+      dir_in: {type: str, default: '../preprocessed_data/'}
+      seed: {type: str, default: '42'}
+      countries: {type: str, default: 'Austria'}
+      max_estimators: {type: str, default: '20'}
+    command: "python forecasting_model_ensemble.py \
+              --dir_in {dir_in} \
+              --seed {seed} \
+              --countries {countries} \
+              --max_estimators {max_estimators}"
+  model:
+    parameters:
+      dir_in: {type: str, default: '../preprocessed_data/'}
+      countries: {type: str, default: 'Portugal'}
+      seed: {type: str, default: '42'}
+      n_trials: {type: str, default: '20'}
+      max_epochs: {type: str, default: '200'}
+      n_layers: {type: str, default: '1'}
+      layer_size: {type: str, default: "100"}
+      l_window: {type: str, default: '240'}
+      f_horizon: {type: str, default: '24'}
+      l_rate: {type: str, default: '1e-4'}
+      activation: {type: str, default: 'ReLU'}
+      optimizer_name: {type: str, default: 'Adam'}
+      batch_size: {type: str, default: '200'}
+    command: "python forecasting_model.py \
+              --dir_in {dir_in} \
+              --countries {countries} \
+              --seed {seed} \
+              --n_trials {n_trials} \
+              --max_epochs {max_epochs} \
+              --n_layers {n_layers} \
+              --layer_size {layer_size} \
+              --l_window {l_window} \
+              --f_horizon {f_horizon} \
+              --l_rate {l_rate} \
+              --activation {activation} \
+              --optimizer_name {optimizer_name} \ 
+              --batch_size {batch_size} "
