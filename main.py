@@ -17,6 +17,8 @@ from mlflow.tracking.fluent import _get_experiment_id
 
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI")
 S3_ENDPOINT_URL = os.environ.get('MLFLOW_S3_ENDPOINT_URL')
+EXPERIMENT_NAME = "mlflow-pipeline"
+# EXP = mlflow.set_experiment(EXPERIMENT_NAME)
 
 def print_run_info(runs):
     for r in runs:
@@ -84,6 +86,19 @@ def _get_or_run(entrypoint, parameters,ignore_previous_run=False, use_cache=True
 
     return MlflowClient().get_run(submitted_run.run_id)
 
+def find_idx(cur_stage):
+    client = MlflowClient()
+    all_run_infos = reversed(client.search_runs(_get_experiment_id()))
+    idx = 0
+    # find how many "entry_points" stages are
+    if(all_run_infos):
+        for runs in all_run_infos:
+            tags = {k: v for k, v in runs.data.tags.items() if not k.startswith("mlflow.")}
+            # print(tags)
+            if 'stage' in tags and tags['stage'] == cur_stage: 
+                print('Found one!')
+                idx += 1
+    return idx
 
 # Remove whitespace from your arguments
 @click.command()
@@ -96,10 +111,18 @@ def _get_or_run(entrypoint, parameters,ignore_previous_run=False, use_cache=True
 def workflow(stages):
     # Note: The entrypoint names are defined in MLproject. The artifact directories
     # are documented by each step's .py file.
-    with mlflow.start_run() as active_run:
+
+    idx = find_idx("main")
+    print(f"Creating main run with index: {idx}")
+    RUN_NAME = f"run_{idx}"
+
+    # with mlflow.start_run() as active_run:
+    with mlflow.start_run(run_name="main") as active_run:
         mlflow.set_tag("stage", "main")
 
         pipeline = stages.split(',')
+
+        return
         # print(stages)
         
         if 'etl' in pipeline or 'all' in pipeline:

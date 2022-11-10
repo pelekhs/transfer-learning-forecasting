@@ -73,6 +73,10 @@ def read_and_validate_input(series_csv: str = "../../RDN/Load_Data/2009-2019-glo
                         index_col=0,
                         parse_dates=True,
                         dayfirst=day_first)
+    print(ts.index)
+    ts.sort_index(ascending=True, inplace=True)
+    print(ts.index)
+    print(ts.index.sort_values())
     if not ts.index.sort_values().equals(ts.index):
         raise DatesNotInOrder()
     elif not (len(ts.columns) == 1 and 
@@ -284,12 +288,13 @@ def isweekend(x):
 
 
 def create_calendar(timeseries, timestep_minutes, holiday_list, local_timezone):
+    local_tz = click.get_current_context().params["local_tz"] # make click argument accessible by function
 
     calendar = pd.DataFrame(
         timeseries.index.tolist(),
         columns=['datetime']
     )
-
+        
     calendar['year'] = calendar['datetime'].apply(lambda x: x.year)
     calendar['month'] = calendar['datetime'].apply(lambda x: x.month)
     calendar['yearweek'] = calendar['datetime'].apply(
@@ -305,9 +310,13 @@ def create_calendar(timeseries, timestep_minutes, holiday_list, local_timezone):
     calendar['yearday'] = calendar['datetime'].apply(
         lambda x: int(x.strftime("%j")) - 1)
 
-    # first convert to utc and then to timestamp
-    calendar['timestamp'] = calendar['datetime'].apply(lambda x: local_timezone.localize(
-        x).replace(tzinfo=pytz.utc).timestamp()).astype(int)
+    if(local_tz):
+        calendar['timestamp'] = calendar['datetime'].apply(
+            lambda x: x.timestamp()).astype(int)
+    else:
+        # first convert to utc and then to timestamp
+        calendar['timestamp'] = calendar['datetime'].apply(
+            lambda x: local_timezone.localize(x).replace(tzinfo=pytz.utc).timestamp()).astype(int)
 
     # national_holidays = Province(name="valladolid").national_holidays()
     # regional_holidays = Province(name="valladolid").regional_holidays()
@@ -501,6 +510,77 @@ def test_impute_function(country, result, max_thhr, a):
     example_imp.plot(label="Interpolation", new_plot=True)
     example_no_imp.plot(label="Original")
 
+def find_country(filename):
+    # Get lists of country names and codes based on pycountry lib
+    country_names = list(map(lambda country : country.name, pycountry.countries))
+    country_codes = list(map(lambda country : country.alpha_2, pycountry.countries))
+
+    cand_countries = [country for country in country_names + ["Czech Republic"] + country_codes 
+                    if country in filename and not country in ["BZ", "BA"]]
+    if len(cand_countries) >= 1:
+        #Always choose the first candidate country
+        country_name = pycountry.countries.search_fuzzy(cand_countries[0])[0].name
+        country_code = pycountry.countries.search_fuzzy(cand_countries[0])[0].alpha_2
+        print(f"File \"{filename}\" belongs to \"{country_name}\" with code \"{country_code}\"")
+        return country_name, country_code
+
+from pytz import country_timezones
+
+def utc_to_local(temp_df, country_code):
+    # Get dictionary of countries and their timezones
+    timezone_countries = {country: timezone 
+                            for country, timezones in country_timezones.items()
+                            for timezone in timezones}
+    local_timezone = timezone_countries[country_code]
+
+    # reset timezone info
+    # temp_df['Start'] = temp_df['Start'].dt.tz_convert(None)
+
+    # convert dates to given timezone, get timezone info
+    temp_df['Start'] = temp_df['Start'].dt.tz_convert(local_timezone)
+
+    # remove timezone information-naive, because next localize() recquires it 
+    # but keep dates to local timezone
+    temp_df['Start'] = temp_df['Start'].dt.tz_localize(None)
+
+    # localize based on timezone, ignore daylight saving time, shift forward if ambiguous datetimes
+    temp_df['Start'] = temp_df['Start'].dt.tz_localize(local_timezone,
+                                                        ambiguous=np.array([False] * temp_df.shape[0]),
+                                                        nonexistent='shift_forward')
+    # crop datetime format (remove '+timezone' suffix)
+    # becomes problemaric when there are multiple timezones on same country
+    # for setting frequency at imputation
+    temp_df['Start'] = temp_df['Start'].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+def store_with_local_time():
+    dir_in = click.get_current_context().params["dir_in"] # make click argument accessible by function
+    tmp_folder = click.get_current_context().params["tmp_folder"] # make click argument accessible by function
+
+    dateparse = lambda x: datetime.strptime(x, '%Y-%m-%d %H:%M:%S%z')
+
+    # For every csv file in folder 
+    for root, dirs, files in os.walk(dir_in):
+        for name in files:
+            print("Loading dataset: "+name)
+            temp_df = pd.read_csv(os.path.join(root, name),
+                                parse_dates=['Start'],
+                                dayfirst=True,
+                                date_parser=dateparse)
+            country_name, country_code = find_country(name)
+            # temp_df['country'], temp_df['code']  = country_name, country_code                                        
+            utc_to_local(temp_df, country_code) # convert 'Start' column from utc to local datetime 
+            temp_df.rename(columns={"Start": "Date"}, errors="raise", inplace=True) #rename column 'Start' to 'Date'
+            temp_df = temp_df[['Date','Load']] # keep only 'Date' and 'Load' columns
+            temp_df.set_index('Date', inplace=True) #set 'Date' as index (neeed for 'read_and_validate...') 
+            temp_df.sort_index(ascending=True, inplace=True)
+
+            if country_name in name:
+                temp_df.to_csv(f"{tmp_folder}{name}")
+                print(f'Store to file \"{name}\"')
+            else:
+                new_name = name.replace(country_code,country_name)
+                temp_df.to_csv(f"{tmp_folder}{new_name}")
+                print(f'Store to file \"{new_name}\"')
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Click ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -516,13 +596,18 @@ def test_impute_function(country, result, max_thhr, a):
 )
 @click.option("--dir_out",
     type=str,
-    default="../preprocessed_Data/",
+    default="../preprocessed_data/",
     help="Local directory where preprocessed timeseries csvs will be stored"
 )
 @click.option("--tmp_folder",
     type=str,
     default="../tmp_data/",    
     help="Temporary directory to store merged-countries data with no outliers (not yet imputed)"
+)
+@click.option("--local_tz",
+    type=bool,
+    default=True,    
+    help="flag if you want local (True) or UTC (False) timezone"
 )
 # @click.option("--csv_names", '-csv', 
 #     default='csv_all',   
@@ -532,7 +617,7 @@ def test_impute_function(country, result, max_thhr, a):
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Main ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-def etl(dir_in,dir_out,tmp_folder):
+def etl(dir_in, dir_out, tmp_folder, local_tz):
     with mlflow.start_run(run_name='etl', nested=True) as mlrun:
         mlflow.set_tag("stage", "etl")
 
@@ -548,26 +633,37 @@ def etl(dir_in,dir_out,tmp_folder):
         if not os.path.exists(tmp_folder):
             os.makedirs(tmp_folder) #create tmp directory if not exists
 
-            # these two lines where outside of function in vanilla script
-            country_ts, country_file_to_name = merge_country_csvs()
-            multiple_ts, names = save_results(country_ts, country_file_to_name)
+            """
+            if we want our data to be based on local timezone of 
+            their country of origin
+            """   
+            if(local_tz):
+                store_with_local_time()
+            else: 
+                # these two lines where outside of function in vanilla script
+                country_ts, country_file_to_name = merge_country_csvs()
+                multiple_ts, names = save_results(country_ts, country_file_to_name)
 
         result, raw_result = read_csvs() # read csv files and remove outliers
 
-
-        for csv in pathlib.Path(tmp_folder).glob('*.csv'):
-            # if any(string in countries for string in ('csv_all', csv.stem)):
-                print(f'Inputing data of country: "{csv.stem}"')
-                logging.info(f'\nInputing data of country: "{csv.stem}"')
+        for root, dirs, files in os.walk(tmp_folder):
+            for name in files:
+                # if any(string in countries for string in ('csv_all', csv.stem)):
+                print(f'Inputing data of csv: "{name}"')
+                logging.info(f'\nInputing data of csv: "{name}"')
                 
-                country = csv.stem #find country of csv (its name given the circumstances)
+                country = None
+                if(local_tz):
+                    country, country_code = find_country(name)
+                else:
+                    country = pathlib.Path(name).stem #find country of csv (its name given the circumstances)
                 code = compile(f"holidays.{country}()", "<string>", "eval") #find country's holidays
                 holidays_ = eval(code)
-                res, null_dates = impute(result[f"{country}.csv"], holidays_, 5000, 0.2, debug=False) # impute datasets and
+                res, null_dates = impute(result[f"{name}"], holidays_, 5000, 0.2, debug=False) # impute datasets and
 
-                print(f'stored to "{dir_out}{country}.csv"')
-                logging.info(f'stored to "{dir_out}{country}.csv"')
-                res.to_csv(f"{dir_out}{country}.csv") #store them on seperate folder (Temp Load Data)
+                print(f'Stored to "{dir_out}{name}"')
+                logging.info(f'Stored to "{dir_out}{name}"')
+                res.to_csv(f"{dir_out}{name}") #store them on seperate folder
 
         # delete temp folder and all its contents
         try:

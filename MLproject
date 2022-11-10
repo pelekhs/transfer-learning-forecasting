@@ -13,9 +13,11 @@ entry_points:
       dir_in: {type: str, default: '../original_data/'}
       dir_out: {type: str, default: '../preprocessed_data/'}
       tmp_folder: {type: str, default: '../tmp_data/'}
+      local_tz: {type: bool, default: True}
     command: "python etl.py \
               --dir_in {dir_in} \
               --dir_out {dir_out} \
+              --local_tz {local_tz} \
               --tmp_folder {tmp_folder} "
   optuna:
     parameters:
