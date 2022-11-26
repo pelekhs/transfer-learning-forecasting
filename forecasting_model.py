@@ -18,9 +18,9 @@ import mlflow
 import tempfile
 
 # Custom made classes and functions used for reading/processing data at input/output of model
-from model_utils import ClickParams, Regression
+from model_utils import ClickParams, Regression, Transfer
 from model_utils import read_csvs, train_test_valid_split, \
-                        feauture_target_split, cross_plot_pred_data, calculate_metrics
+                        feature_target_split, cross_plot_pred_data, calculate_metrics
 
 def train_test_best_model():
     """
@@ -32,22 +32,30 @@ def train_test_best_model():
         predictions:  1-D list containing predictions for said labels
     """
     params = vars(click_params)
-
-    params['output_dims'] = [value for key,value in params.items() 
-                                  if key.startswith('n_units_l')]
-
-    trainer = Trainer(max_epochs=params['max_epochs'], auto_scale_batch_size=None, 
-                    #   profiler="simple", #add simple profiler
-                      callbacks=[EarlyStopping(monitor="val_loss", mode="min", verbose=True)],
-                      gpus=0 if torch.cuda.is_available() else None,
-                      deterministic=True) 
+    
+    # layer_sizes must be iterable for creating model layers
+    params['layer_sizes'] = [params['layer_sizes']] 
 
     pl.seed_everything(click_params.seed, workers=True)    
-    model = Regression(params) # double asterisk (dictionary unpacking)
+    model = Regression(**params) # double asterisk (dictionary unpacking)
+
+    max_epochs = None
+    if(model.transfer_mode == Transfer.BOUNDED_EPOCHS):
+        max_epochs = 5 # bounded epochs
+    else:
+        max_epochs = params['max_epochs']
+
+    trainer = Trainer(max_epochs=max_epochs, auto_scale_batch_size=None, 
+                    #   profiler="simple", #add simple profiler
+                    callbacks=[EarlyStopping(monitor="val_loss", mode="min", verbose=True)],
+                    gpus=0 if torch.cuda.is_available() else None,
+                    deterministic=True) 
 
     trainer.fit(model)
 
-    mlflow.pytorch.log_model(model, "model")
+    pl.utilities.model_summary.ModelSummary(model, max_depth=-1)
+
+    # mlflow.pytorch.log_model(model, "model")
 
     # Either best or path to the checkpoint you wish to test. 
     # If None and the model instance was passed, use the current weights. 
@@ -80,8 +88,8 @@ def sklearn_regress():
         actuals: list containing target labels
         predictions: list containing predictions for said labels
     """
-    train_X, train_Y = feauture_target_split(train_data,click_params.l_window,click_params.f_horizon)  
-    test_X, test_Y = feauture_target_split(test_data,click_params.l_window,click_params.f_horizon)
+    train_X, train_Y = feature_target_split(train_data,click_params.l_window,click_params.f_horizon)  
+    test_X, test_Y = feature_target_split(test_data,click_params.l_window,click_params.f_horizon)
 
     regr = MLPRegressor(random_state=42,
                         early_stopping=True,
@@ -110,19 +118,16 @@ def sklearn_regress():
 @click.option("--dir_in", type=str, default='../preprocessed_data/', help="File containing csv files used by the model")
 @click.option("--countries", type=str, default="Portugal", help='csv names from dir_in used by the model')
 @click.option("--seed", type=str, default="42", help='seed used to set random state to the model')
-# @click.option("--opt_model_path", type=str, default="./optuna_model.pt")
-
-@click.option("--n_trials", type=str, default="20", help='number of trials - different tuning oh hyperparams')
 @click.option("--max_epochs", type=str, default="200", help='range of number of epochs used by the model')
 @click.option("--n_layers", type=str, default="1", help='range of number of layers used by the model')
-@click.option("--layer_size", type=str, default="100", help='range of size of each layer used by the model')
+@click.option("--layer_sizes", type=str, default="100", help='range of size of each layer used by the model')
 @click.option("--l_window", type=str, default="240", help='range of lookback window (input layer size) used by the model')
 @click.option("--f_horizon", type=str, default="24", help='range of forecast horizon (output layer size) used by the model')
 @click.option("--l_rate", type=str, default="1e-4", help='range of learning rate used by the model')
 @click.option("--activation", type=str, default="ReLU", help='activations function experimented by the model')
 @click.option("--optimizer_name", type=str, default="Adam", help='optimizers experimented by the model') # SGD
 @click.option("--batch_size", type=str, default="200", help='possible batch sizes used by the model') #16,32,
-
+@click.option("--transfer_mode", type=str, default="0", help='indicator to use transfer learning techniques')
 
 def forecasting_model(**kwargs):
     """
@@ -135,45 +140,47 @@ def forecasting_model(**kwargs):
         kwargs: dictionary containing click paramters used by the script
     Returns: None 
     """
-    # Auto log all MLflow entities
-    mlflow.pytorch.autolog()
+    with mlflow.start_run(run_name="train",nested=True) as train_start:
 
-    # store mlflow metrics/artifacts on temp file
-    train_tmpdir = tempfile.mkdtemp()
+        # Auto log all MLflow entities
+        mlflow.pytorch.autolog()
 
-    global click_params
-    click_params = ClickParams(kwargs)
+        # store mlflow metrics/artifacts on temp file
+        train_tmpdir = tempfile.mkdtemp()
 
-    print("=================== Click Params ===================")
-    print(vars(click_params))
-    
-    #  read csv files
-    df = read_csvs(click_params)
-    df_backup = df.copy()
+        global click_params
+        click_params = ClickParams(kwargs)
+        
+        # #  read csv files
+        df = read_csvs(click_params)
+        df_backup = df.copy()
 
-    # split data in train/test/validation
-    global train_data, test_data, val_data
-    train_data, test_data, val_data = train_test_valid_split(df)
+        # split data in train/test/validation
+        global train_data, test_data, val_data
+        train_data, test_data, val_data = train_test_valid_split(df)
 
-    train_data.to_csv(f"{train_tmpdir}/train_data.csv")
-    test_data.to_csv(f"{train_tmpdir}/test_data.csv")
-    val_data.to_csv(f"{train_tmpdir}/val_data.csv")
+        # train_data.to_csv(f"{train_tmpdir}/train_data.csv")
+        # test_data.to_csv(f"{train_tmpdir}/test_data.csv")
+        # val_data.to_csv(f"{train_tmpdir}/val_data.csv")
 
-    # train model with hparams set to best_params of optuna 
-    plot_pred, plot_actual = train_test_best_model()
-    # plot_pred, plot_actual = sklearn_regress()
+        # train model with hparams set to best_params of optuna 
+        plot_pred, plot_actual = train_test_best_model()
+        # plot_pred, plot_actual = sklearn_regress()
 
-    # calculate metrics
-    metrics = calculate_metrics(plot_actual,plot_pred)
+        # calculate metrics
+        metrics = calculate_metrics(plot_actual,plot_pred)
 
-    # plot prediction/actual data on common axis system 
-    cross_plot_pred_data(df_backup, plot_pred, plot_actual, train_tmpdir)
+        # plot prediction/actual data on common axis system 
+        cross_plot_pred_data(df_backup, plot_pred, plot_actual, train_tmpdir)
 
-    print("\nUploading training csvs and metrics to MLflow server...")
-    logging.info("\nUploading training csvs and metrics to MLflow server...")
-    mlflow.set_tag("stage", "model")
-    mlflow.log_artifacts(train_tmpdir, "train_results")
-    mlflow.log_metrics(metrics)
+        print("\nUploading training csvs and metrics to MLflow server...")
+        logging.info("\nUploading training csvs and metrics to MLflow server...")
+        mlflow.set_tag("run_id", train_start.info.run_id)        
+        mlflow.set_tag("stage", "model")
+        mlflow.set_tag("transfer", Transfer(click_params.transfer_mode).name)
+        mlflow.log_params(kwargs)
+        mlflow.log_artifacts(train_tmpdir, "train_results")
+        mlflow.log_metrics(metrics)
 
 if __name__ == '__main__':
     print("\n=========== Forecasing Model =============")

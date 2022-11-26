@@ -31,3 +31,6 @@ dependencies:
 - statsmodels==0.13.2
 # pickle==4.0
 - torchensemble==0.1.9
+- python-dotenv-0.21.0
+- coloredlogs-15.0.1 
+- humanfriendly-10.0

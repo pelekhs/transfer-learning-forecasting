@@ -1,4 +1,5 @@
 import pandas as pd
+from enum import IntEnum
 from datetime import datetime
 import pathlib
 from matplotlib import pyplot as plt
@@ -22,6 +23,10 @@ from pytorch_lightning.profiler import Profiler, AdvancedProfiler
 from torchmetrics import MeanAbsolutePercentageError
 
 import pytorch_lightning as pl
+
+import mlflow
+from mlflow import MlflowClient
+from mlflow.entities import ViewType
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Globals ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 click_params = None
@@ -47,17 +52,27 @@ class DataScaler:
         temp_df[columns] = self.scaler.inverse_transform(dframe[columns])
         return temp_df
 
-#### Class used to store and utilize click arguments passed to the script
+#### Enum used to define transfer learning techniques used  
+class Transfer(IntEnum):
+    NO_TRANSFER = 0
+    WARM_START = 1 
+    BOUNDED_EPOCHS = 2
+    FREEZING = 3
+    HEAD_REPLACEMENT = 4
 
+#### Class used to store and utilize click arguments passed to the script
 class ClickParams:
     def __init__(self, click_args):
         super(ClickParams, self).__init__()
         
         for key, value in click_args.items():
+            if(isinstance(value, bool)):
+               setattr(self, key, value); continue 
+
             split_value = value.split(',') # split string into a list delimited by comma
 
             if not split_value: # if empty list
-                sys.exit(f"Empty value for paramter {key}")
+                sys.exit(f"Empty value for parameter {key}")
             
             if(len(split_value) == 1): # if single value, check if int/float/str
                 if(value.isdigit()): setattr(self, key, int(value)); continue;
@@ -108,63 +123,122 @@ class Regression(pl.LightningModule):
         one output layer (size 36 as we are predicting next 36 hours)
         hidden layers define by 'params' argument of init
     """
-    def __init__(self,params):
+    def __init__(self, **params):
         super(Regression, self).__init__()
-        self.l_rate = params['l_rate']
-        self.batch_size = params['batch_size']
-        self.l_window = params['l_window']
-        self.f_horizon = params['f_horizon']
-        # self.loss = nn.MSELoss() # MSE
-        # self.loss = nn.L1Loss() # MAE 
-        self.loss = MeanAbsolutePercentageError() #MAPE
-        self.optimizer_name = params['optimizer_name']
-        self.output_dims = params['output_dims']
-        self.activation = params['activation']
-                
-        layers = [] #list of layer to add at nn
 
-        input_dim = self.l_window #input dim set to lookback_window
-        output_dim = self.f_horizon #output dim set to f_horizon
+        self.loss = MeanAbsolutePercentageError() #MAPE
+
+        # by default, no transfer learning, init in case of optuna/ensemble        
+        self.transfer_mode = Transfer.NO_TRANSFER 
+        if('transfer_mode' in params): 
+            self.transfer_mode = Transfer(params['transfer_mode'])
+
+        # enable Lightning to store all the provided arguments 
+        # under the self.hparams attribute. 
+        # These hyperparameters will also be stored within the model checkpoint
+        self.save_hyperparameters()
+
+        input_dim = self.hparams.l_window #input dim set to lookback_window
+        output_dim = self.hparams.f_horizon #output dim set to f_horizon
         
         # create datasets used by dataloaders
         # 'subset'_X: dataset containing features of subset (train/test/validation) dataframe
         # 'subset'_Y: dataset containing targets of subset (train/test/validation) dataframe
         global train_data, test_data, val_data
-        self.train_X, self.train_Y = feauture_target_split(train_data,input_dim,output_dim)  
-        self.test_X, self.test_Y = feauture_target_split(test_data,input_dim,output_dim)
-        self.validation_X, self.validation_Y = feauture_target_split(val_data,input_dim,output_dim)  
-        
+        self.train_X, self.train_Y = feature_target_split(train_data,input_dim,output_dim)  
+        self.test_X, self.test_Y = feature_target_split(test_data,input_dim,output_dim)
+        self.validation_X, self.validation_Y = feature_target_split(val_data,input_dim,output_dim)          
+
+        """
+        feature_extractor: all layers before classifier
+        classifier: last layer connecting output with rest of network (not always directly)
+        We load proper pretrained model, and use its feauture_extractor for the new untrained one
+        (Also check forward pass commentary)
+        """
+        self.feature_extractor = None        
+        self.classifier = None
+
+        if(self.transfer_mode == Transfer.NO_TRANSFER):
+            print(f'input_dim: {input_dim}')
+            feature_layers, last_dim = self.make_hidden_layers()
+            self.feature_extractor = nn.Sequential(*feature_layers) #list of nn layers
+            print(f'last_dim: {last_dim}')
+            self.classifier = nn.Linear(last_dim, output_dim)
+        else:
+            # get best pretrained model and load its feature extractor
+            best_run = self.search_proper_run()
+            model = mlflow.pytorch.load_model(f"runs:/{best_run.info.run_id}/model") 
+
+            # get dimension of last hidden layer of model (one before output)
+            last_dim = model.hparams.layer_sizes[-1]
+            self.feature_extractor = model.feature_extractor # "old" feature extractor
+            self.classifier = nn.Linear(last_dim, output_dim) # new classifier
+
+            if(self.transfer_mode == Transfer.WARM_START):
+                print('Using \"WARM START\" technique...')
+                self.classifier = model.classifier # "old" classifier
+
+            if(self.transfer_mode == Transfer.FREEZING):
+                print('Using \"FREEZING\" technique...') # freeze feature layers
+                # self.feature_extractor.eval() # disable dropout/BatchNorm layers using eval()
+                self.feature_extractor.requires_grad_(False) # freeze params
+                # self.feature_extractor.freeze() 
+
+    def search_proper_run(self):
+        # find best pretrained model by searching runs with best performance (MAPE)
+        # (NOT CORRECT, CHECK RUNS BASED ON WHAT CSVS ARE USED + PERFORMANCE) 
+        filter_string = f'tags.stage = "model"' # search only runs in 'model' stage
+        best_run = MlflowClient().search_runs(experiment_ids="0",
+                                              filter_string=filter_string,
+                                              run_view_type=ViewType.ACTIVE_ONLY,
+                                              max_results=1,
+                                              order_by=["metrics.MAPE DESC"]
+                                            #   order_by=['end_time DESC']
+                                              )[0]
+        print(f"Found best model run with ID: {best_run.info.run_id}")
+        return best_run
+
+    def make_hidden_layers(self):
         """
         Each loop is the setup of a new layer
         At each iteration:
-            1. add previous layer to the next (with parameters gotten from output_dims)
+            1. add previous layer to the next (with parameters gotten from layer_sizes)
                     at first iteration previous layer is input layer
             2. add activation function
             3. set current_layer as next layer
         connect last layer with cur_layer
+        Parameters: None
+        Returns: 
+            layers: list containing input layer through last hidden one
+            cur_layer: size (dimension) of the last hidden layer      
         """
-        for cur_layer in self.output_dims: 
-            layers.append(nn.Linear(input_dim, cur_layer))
-            layers.append(getattr(nn, self.activation)()) # nn.activation_function (as suggested by Optuna)
-            input_dim = cur_layer #connect cur_layer with previous layer (at first iter, input layer)
-        
-        #connect last layer (stored at input_din) with target layer (output_dim)            
-        layers.append(nn.Linear(input_dim, output_dim)) 
-        self.layers = nn.Sequential(*layers) #list of nn layers
+        layers = [] # list of layer to add at nn
+        cur_layer = self.hparams.l_window
+
+        for next_layer in self.hparams.layer_sizes: 
+            layers.append(nn.Linear(cur_layer, next_layer))
+            layers.append(getattr(nn, self.hparams.activation)()) # nn.activation_function (as suggested by Optuna)
+            cur_layer = next_layer #connect cur_layer with previous layer (at first iter, input layer)
+        return layers, cur_layer
 
     # Perform the forward pass
     def forward(self, x):
-        return self.layers(x)
+        """
+        In forward pass, we pass input through (freezed or not) feauture extractor
+        and then its output through the classifier 
+        """
+        representations = self.feature_extractor(x)
+        return self.classifier(representations)
 
 ### The Data Loaders ###     
     # Define functions for data loading: train / validate / test
     def train_dataloader(self):
-        feature = torch.tensor(self.train_X.values).float() #feauture tensor train_X
+        feature = torch.tensor(self.train_X.values).float() #feature tensor train_X
         target = torch.tensor(self.train_Y.values).float() #target tensor train_Y
         train_dataset = TensorDataset(feature, target)  # dataset bassed on feature/target
         train_loader = DataLoader(dataset = train_dataset, 
                                   shuffle=True, 
-                                  batch_size = self.batch_size)
+                                  batch_size = self.hparams.batch_size)
         return train_loader
             
     def test_dataloader(self):
@@ -172,7 +246,7 @@ class Regression(pl.LightningModule):
         target = torch.tensor(self.test_Y.values).float()
         test_dataset = TensorDataset(feature, target)
         test_loader = DataLoader(dataset = test_dataset, 
-                                 batch_size = self.batch_size)
+                                 batch_size = self.hparams.batch_size)
         return test_loader
 
     def val_dataloader(self):
@@ -180,7 +254,7 @@ class Regression(pl.LightningModule):
         target = torch.tensor(self.validation_Y.values).float()
         val_dataset = TensorDataset(feature, target)
         validation_loader = DataLoader(dataset = val_dataset,
-                                       batch_size = self.batch_size)
+                                       batch_size = self.hparams.batch_size)
         return validation_loader
 
     def predict_dataloader(self):
@@ -189,10 +263,10 @@ class Regression(pl.LightningModule):
 ### The Optimizer ### 
     # Define optimizer function: here we are using ADAM
     def configure_optimizers(self):
-        return getattr(optim, self.optimizer_name)( self.parameters(),
-                                                    # momentum=0.9, 
-                                                    # weight_decay=1e-4,                   
-                                                    lr=self.l_rate)
+        return getattr(optim, self.hparams.optimizer_name)( self.parameters(),
+                                                            # momentum=0.9, 
+                                                            # weight_decay=1e-4,                   
+                                                            lr=self.hparams.l_rate)
 
 ### Training ### 
     # Define training step
@@ -318,7 +392,7 @@ def train_test_valid_split(df):
     # print("validation shape: {}".format(val_data.shape))
     return train_data, test_data, val_data
 
-def feauture_target_split(df, lookback_window=168, forecast_horizon=36):# lookback_window: 168 = 7 days(* 24 hours)
+def feature_target_split(df, lookback_window=168, forecast_horizon=36):# lookback_window: 168 = 7 days(* 24 hours)
     """
     This function gets a column of a dataframe and splits it to input and target
     
@@ -326,11 +400,11 @@ def feauture_target_split(df, lookback_window=168, forecast_horizon=36):# lookba
     In a for-loop of 'lookback_window' max iterations, starting from 0 
     At N-th iteration (iter): 
         1. create a shifted version of 'Load' column by N rows (vertically) and 
-        2. stores it in a column* (feauture_'N')
+        2. stores it in a column* (feature_'N')
 
     Same pseudo-code for 'forecast_horizon' loop
     
-    *At first iterations of both loops, the new columns (feauture/target) are going to be firstly created
+    *At first iterations of both loops, the new columns (feature/target) are going to be firstly created
     but for each iteration, the same columns are going to be used
     
     We store each new column created in a dictionary which, at the end, convert it to dataframe
@@ -344,7 +418,7 @@ def feauture_target_split(df, lookback_window=168, forecast_horizon=36):# lookba
         forecast_horizon: forecast_horizon - # target columns - # outputs in model
     ----------
     Returns
-        'subset'_X: pandas.dataframe containing feautures of df after preprocess for model
+        'subset'_X: pandas.dataframe containing features of df after preprocess for model
         'subset'_Y: pandas.dataframe containing targets of df after preprocess for model
     -------
     """
@@ -357,7 +431,7 @@ def feauture_target_split(df, lookback_window=168, forecast_horizon=36):# lookba
     df_new = {}
         
     for inc in range(0,int(lookback_window)):
-        df_new['feauture_' + str(inc)] = df_copy['Load'].shift(-inc)
+        df_new['feature_' + str(inc)] = df_copy['Load'].shift(-inc)
 
     # shift 'load' column permanently for as many shifts happened at 'lookback_window' loops  
     df_copy['Load'] = df_copy['Load'].shift(-int(lookback_window))

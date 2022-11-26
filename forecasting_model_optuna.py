@@ -19,7 +19,6 @@ import torch
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 # from pytorch_lightning.profiler import Profiler, AdvancedProfiler
-from pytorch_lightning.callbacks import EarlyStopping
 
 import logging
 import pickle
@@ -27,11 +26,9 @@ import click
 import mlflow
 
 from model_utils import ClickParams, Regression
-from model_utils import read_csvs, train_test_valid_split, \
-                        cross_plot_pred_data, calculate_metrics
+from model_utils import read_csvs, train_test_valid_split
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Globals ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-# dataScaler = None 
 click_params = None
 opt_tmpdir = None
 
@@ -56,7 +53,6 @@ In Optuna:
     Each "execution" of the objective function is basically a "trial"
         trial (in context): one training of model for specific set of suggestive parameters (check params)
 """
-
 def objective(trial):
     """
     Function used by optuna for hyperparameter tuning
@@ -75,7 +71,7 @@ def objective(trial):
     params = {
         'l_window': trial.suggest_int("l_window", click_params.l_window[0], click_params.l_window[1]),
         'f_horizon': trial.suggest_int("f_horizon", click_params.f_horizon[0], click_params.f_horizon[1]),
-        'output_dims': [trial.suggest_int("n_units_l{}".format(i), click_params.layer_size[0], click_params.layer_size[1], log=True) for i in range(n_layers)],
+        'layer_sizes': [trial.suggest_int("n_units_l{}".format(i), click_params.layer_sizes[0], click_params.layer_sizes[1], log=True) for i in range(n_layers)],
         'l_rate':    trial.suggest_float('l_rate', click_params.l_rate[0], click_params.l_rate[1], log=True), # loguniform will become deprecated
         'activation': trial.suggest_categorical("activation", click_params.activation), #SiLU (Swish) performs good
         'optimizer_name': trial.suggest_categorical("optimizer_name", click_params.optimizer_name),
@@ -95,7 +91,7 @@ def objective(trial):
                       deterministic=True)
 
     pl.seed_everything(click_params.seed, workers=True)    
-    model = Regression(params) # double asterisk (dictionary unpacking)
+    model = Regression(**params) # double asterisk (dictionary unpacking)
     trainer.logger.log_hyperparams(params)
     trainer.fit(model)
     return trainer.callback_metrics["val_loss"].item()
@@ -106,7 +102,35 @@ def objective(trial):
 # Theory:
 # https://coderzcolumn.com/tutorials/machine-learning/simple-guide-to-optuna-for-hyperparameters-optimization-tuning
 
+def store_params(study):
+    best_params = {}; best_params.update(study.best_params)
+    best_params['layer_sizes'] = ','.join(str(value) 
+                                    for key,value in best_params.items() 
+                                    if key.startswith('n_units_l'))
+
+    # remove n_units_lXXX elements 
+    best_params = { k: v for k, v in best_params.items() 
+                    if not k.startswith("n_units_l")}
+
+    print(f'Store best_params: {best_params}')
+    # write binary, overwrite if file exists, creates file if not exists
+    best_trial_file = open(f"{opt_tmpdir}/optuna_best_trial.pkl", "wb") 
+    pickle.dump(best_params, best_trial_file)
+    best_trial_file.close()    
+
+    best_result = copy.deepcopy(study.best_params)
+    best_result['value'] = study.best_trial.value
+
+    # appends, pointer at EOF if file exists, creates file if not exists    
+    with open('best_trial_diary.txt','a') as trial_diary_file: 
+        trial_diary_file.write(str(best_result)+ "\n")
+
+    study.trials_dataframe().to_csv(f"{opt_tmpdir}/trials_dataframe.csv")
+                
 def print_optuna_report(study):
+    """
+    This function prints hyperparameters found by optuna
+    """    
     warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
 
     print("\n ~~~~~~~~~~~~~~~~~~~~~~~~~~ Optuna Report ~~~~~~~~~~~~~~~~~~~~~~~~~~")
@@ -121,18 +145,6 @@ def print_optuna_report(study):
     for key, value in trial.params.items():
         print("    {}: {}".format(key, value))
 
-    # write binary, overwrite if file exists, creates file if not exists
-    best_trial_file = open("optuna_best_trial.pkl", "wb") 
-    pickle.dump(study.best_params, best_trial_file)
-    best_trial_file.close()    
-
-    best_result = copy.deepcopy(study.best_params)
-    best_result['value'] = study.best_trial.value
-
-    # appends, pointer at EOF if file exists, creates file if not exists    
-    with open('best_trial_diary.txt','a') as trial_diary_file: 
-        trial_diary_file.write(str(best_result)+ "\n")
-        
 # The pruners module defines a BasePruner class characterized by an abstract prune() method, which, 
 # for a given trial and its associated study, returns a boolean value 
 # representing whether the trial should be pruned (aborted)
@@ -164,10 +176,9 @@ def optuna_optimize():
                                                 timeout period elapses, stop() is called or, 
                                                 a termination signal such as SIGTERM or Ctrl+C is received.
     """
-
     study.optimize(objective,
                 #    timeout=600, # 10 minutes
-                   n_trials=click_params.n_trials) # 10 trials
+                   n_trials=click_params.n_trials)
     print_optuna_report(study)
     return study
 
@@ -192,51 +203,6 @@ def optuna_visualize(study):
     optuna.visualization.matplotlib.plot_intermediate_values(study)
     plt.savefig(f"{opt_tmpdir}/plot_intermediate_values.png"); plt.close()
 
-def train_test_best_model(study):
-    """
-    This function is used to train and test our pytorch lightning model
-    based on parameters give to it
-    Parameters: 
-        study object
-    Returns: 
-        actuals: 1-D list containing target labels
-        predictions:  1-D list containing predictions for said labels
-    """
-
-    best_params = study.best_params.copy()
-
-    best_params['output_dims'] = [value for key,value in best_params.items() 
-                                  if key.startswith('n_units_l')]
-
-    trainer = Trainer(max_epochs=10, auto_scale_batch_size=None, 
-                      callbacks=[EarlyStopping(monitor="val_loss", mode="min")],
-                      gpus=0 if torch.cuda.is_available() else None,
-                      deterministic=True) 
-
-    model = Regression(best_params) # double asterisk (dictionary unpacking)
-
-    trainer.fit(model)
-
-    # Either best or path to the checkpoint you wish to test. 
-    # If None and the model instance was passed, use the current weights. 
-    # Otherwise, the best model from the previous trainer.fit call will be loaded.
-    trainer.test(ckpt_path='best')
-
-    trainer.validate()
-
-    preds = trainer.predict(ckpt_path='best')
-    actuals = []
-    for x,y in model.test_dataloader(): 
-        actuals.append(y)
-
-    # torch.vstack: convert list of tensors to (rank 2) tensor
-    # .tolist(): convert (rank 2) tensor to list of lists
-    # final outcome: list of floats
-    preds = [item for sublist in torch.vstack(preds).tolist() for item in sublist]
-    actuals = [item for sublist in torch.vstack(actuals).tolist() for item in sublist]
-
-    return preds, actuals
-
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Click ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 # Remove whitespace from your arguments
@@ -248,13 +214,11 @@ def train_test_best_model(study):
 @click.option("--dir_in", type=str, default='../preprocessed_data/', help="File containing csv files used by the model")
 @click.option("--countries", type=str, default="Portugal", help='csv names from dir_in used by the model')
 @click.option("--seed", type=str, default="42", help='seed used to set random state to the model')
-@click.option("--opt_model_path", type=str, default="./optuna_model.pt")
-
 @click.option("--n_trials", type=str, default="20", help='number of trials - different tuning oh hyperparams')
 @click.option("--max_epochs", type=str, default="5,10", help='range of number of epochs used by the model')
 @click.option("--n_layers", type=str, default="1,2", help='range of number of layers used by the model')
-@click.option("--layer_size", type=str, default="90,150", help='range of size of each layer used by the model')
-@click.option("--l_window", type=str, default="240,250", help='range of lookback window (input layer size) used by the model')
+@click.option("--layer_sizes", type=str, default="90,110", help='range of size of each layer used by the model')
+@click.option("--l_window", type=str, default="220,260", help='range of lookback window (input layer size) used by the model')
 @click.option("--f_horizon", type=str, default="24,25", help='range of forecast horizon (output layer size) used by the model')
 @click.option("--l_rate", type=str, default="1e-5, 1e-4", help='range of learning rate used by the model')
 @click.option("--activation", type=str, default="ReLU,SiLU", help='activations function experimented by the model')
@@ -272,63 +236,45 @@ def forecasting_model(**kwargs):
         kwargs: dictionary containing click paramters used by the script
     Returns: None 
     """
-    # Auto log all MLflow entities
-    mlflow.pytorch.autolog()
-    
-    # store mlflow metrics/artifacts on temp file
-    global opt_tmpdir
-    opt_tmpdir = tempfile.mkdtemp()
+    with mlflow.start_run(run_name="optuna",nested=True) as optuna_start:
+        # Auto log all MLflow entities
+        mlflow.pytorch.autolog()
+        
+        # store mlflow metrics/artifacts on temp file
+        global opt_tmpdir
+        opt_tmpdir = tempfile.mkdtemp()
 
-    global click_params
-    click_params = ClickParams(kwargs)
+        global click_params
+        click_params = ClickParams(kwargs)
 
-    print("=================== Click Params ===================")
-    print(vars(click_params))
-    
-    #  read csv files
-    df = read_csvs(click_params)
-    df_backup = df.copy()
+        print("=================== Click Params ===================")
+        print(vars(click_params))
+        
+        #  read csv files
+        df = read_csvs(click_params)
 
-    # global dataScaler 
-    # dataScaler = DataScaler(min=0,max=1)
+        # split data in train/test/validation
+        global train_data, test_data, val_data
+        train_data, test_data, val_data = train_test_valid_split(df)
 
-    # use minmax to scale data between feauture range set by dataScaler (default min_max) 
-    # df = dataScaler.scale_transform(df)
+        # train_data.to_csv(f"{opt_tmpdir}/train_data.csv")
+        # test_data.to_csv(f"{opt_tmpdir}/test_data.csv")
+        # val_data.to_csv(f"{opt_tmpdir}/val_data.csv")
 
-    # split data in train/test/validation
-    global train_data, test_data, val_data
-    train_data, test_data, val_data = train_test_valid_split(df)
+        # use Optuna to make a study for best hyperparamter values for maxiumum reduction of loss function
+        study = optuna_optimize()
 
-    train_data.to_csv(f"{opt_tmpdir}/train_data.csv")
-    test_data.to_csv(f"{opt_tmpdir}/test_data.csv")
-    val_data.to_csv(f"{opt_tmpdir}/val_data.csv")
+        store_params(study)        
+        
+        # visualize results of study
+        optuna_visualize(study)
 
-    # use Optuna to make a study for best hyperparamter values for maxiumum reduction of loss function
-    study = optuna_optimize()
-
-    study.trials_dataframe().to_csv(f"{opt_tmpdir}/trials_dataframe.csv")
-
-    # visualize results of study
-    optuna_visualize(study)
-
-    # train model with hparams set to best_params of optuna 
-    plot_pred, plot_actual = train_test_best_model(study)
-
-    # rescale values based on mean and std of 'Load' column
-    # plot_actual_r = dataScaler.inverse_scale_transform(pd.DataFrame(plot_actual,columns=['Load']))
-    # plot_pred_r = dataScaler.inverse_scale_transform(pd.DataFrame(plot_pred,columns=['Load']))
-
-    # calculate metrics
-    metrics = calculate_metrics(plot_actual,plot_pred)
-
-    # plot prediction/actual data on common axis system 
-    cross_plot_pred_data(df_backup, plot_pred, plot_actual, opt_tmpdir)
-
-    print("\nUploading training csvs and metrics to MLflow server...")
-    logging.info("\nUploading training csvs and metrics to MLflow server...")
-    mlflow.set_tag("stage", "optuna")
-    mlflow.log_artifacts(opt_tmpdir, "optuna_results")
-    mlflow.log_metrics(metrics)
+        print("\nUploading training csvs and metrics to MLflow server...")
+        logging.info("\nUploading training csvs and metrics to MLflow server...")
+        mlflow.set_tag("run_id", optuna_start.info.run_id)
+        mlflow.set_tag("stage", "optuna")
+        mlflow.log_params(kwargs)
+        mlflow.log_artifacts(opt_tmpdir, "optuna_results")
 
 if __name__ == '__main__':
     print("\n=========== Optuna Hyperparameter Tuning =============")

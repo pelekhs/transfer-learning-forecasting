@@ -63,15 +63,15 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
         actuals: 1-D list containing target labels
         predictions:  1-D list containing predictions for said labels
     """
-    a_file = open("optuna_best_trial.pkl", "rb")
-    best_params = pickle.load(a_file)
 
-    best_params['output_dims'] = [value for key,value in best_params.items() 
-                                if key.startswith('n_units_l')]
-    print(best_params)
+    pl.seed_everything(click_params.seed, workers=True)  
 
-    pl.seed_everything(click_params.seed, workers=True)    
-    regression_model = Regression(best_params) # double asterisk (dictionary unpacking)
+    best_params = {}; best_params.update(vars(click_params)); del best_params['n_estimators']
+    
+    # layer_sizes must be iterable for creating model layers
+    best_params['layer_sizes'] = [best_params['layer_sizes']] 
+  
+    regression_model = Regression(**best_params) # double asterisk (dictionary unpacking)
 
     train_loader = regression_model.train_dataloader()
     test_loader = regression_model.test_dataloader()
@@ -94,15 +94,15 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
     else:
         ensemble_model = torchensemble.BaggingRegressor(
             estimator=regression_model,
-            n_estimators=3, #click_params.max_estimators,
+            n_estimators=click_params.n_estimators,
             cuda=False
         )
 
-        ensemble_model.set_optimizer(optimizer_name=best_params['optimizer_name'],
-                                    lr=best_params['l_rate'])
+        ensemble_model.set_optimizer(optimizer_name=click_params.optimizer_name,
+                                    lr=click_params.l_rate)
         ensemble_model.set_criterion(MeanAbsolutePercentageError())
 
-        ensemble_model.fit(epochs=best_params['max_epochs'],
+        ensemble_model.fit(epochs=click_params.max_epochs,
                         train_loader=train_loader,
                         test_loader=val_loader,
                         save_model=True,
@@ -110,6 +110,9 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
 
     mse_loss = ensemble_model.evaluate(test_loader)
     print(f'Testing mean squared error of the fitted ensemble: {mse_loss}')
+
+    # store BaggingRegressor in mlflow as artifact "ensemble_model"
+    mlflow.pytorch.log_model(ensemble_model, "ensemble_model")
 
     actuals_X = []
     actuals_Y = []
@@ -119,7 +122,7 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
 
     # actuals: tensor of tensor-batches
     # actuals[0]: first tensor-batch
-    # actuals[0][0]: first feauture/target of first batch
+    # actuals[0][0]: first feature/target of first batch
 
     # torch.vstack: convert list of tensors to (rank 2) tensor
     # .tolist(): convert (rank 2) tensor to list of lists
@@ -129,16 +132,16 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
 
     # find max len of list (rows of later np.array) that is 
     # divisible by lookback_window to be fed as batches to predict
-    new_len = findNewRows(len(actuals_X),best_params['l_window'])
+    new_len = findNewRows(len(actuals_X),click_params.l_window)
     actuals_X = actuals_X[:new_len]
     print(f"new_len: {new_len}")
 
     # reshape 1-D matrix (created by list train_X) for it to be multipled by input layer matrix
     # matrix shape: [any, lookback_window]
-    preds = ensemble_model.predict(np.array(actuals_X).reshape(-1, best_params['l_window']))
+    preds = ensemble_model.predict(np.array(actuals_X).reshape(-1, click_params.l_window))
 
     # convert preds to 1-D list
-    # keep in actuals_Y, the targets of feautures used by predict()
+    # keep in actuals_Y, the targets of features used by predict()
     preds = [item for sublist in preds.tolist() for item in sublist]
     actuals_Y = actuals_Y[:len(preds)]
 
@@ -155,7 +158,17 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
 @click.option("--dir_in", type=str, default='../preprocessed_data/', help="File containing csv files used by the model")
 @click.option("--countries", type=str, default="Portugal", help='csv names from dir_in used by the model')
 @click.option("--seed", type=str, default="42", help='seed used to set random state to the model')
-@click.option("--max_estimators", type=str, default="10", help='number of estimators (models) used in ensembling')
+@click.option("--max_epochs", type=str, default="200", help='range of number of epochs used by the model')
+@click.option("--n_layers", type=str, default="1", help='range of number of layers used by the model')
+@click.option("--layer_sizes", type=str, default="100", help='range of size of each layer used by the model')
+@click.option("--l_window", type=str, default="240", help='range of lookback window (input layer size) used by the model')
+@click.option("--f_horizon", type=str, default="24", help='range of forecast horizon (output layer size) used by the model')
+@click.option("--l_rate", type=str, default="1e-4", help='range of learning rate used by the model')
+@click.option("--activation", type=str, default="ReLU", help='activations function experimented by the model')
+@click.option("--optimizer_name", type=str, default="Adam", help='optimizers experimented by the model') # SGD
+@click.option("--batch_size", type=str, default="200", help='possible batch sizes used by the model') #16,32,
+@click.option("--transfer_mode", type=str, default="0", help='indicator to use transfer learning techniques')
+@click.option("--n_estimators", type=str, default="3", help='number of estimators (models) used in ensembling')
 
 def forecasting_model(**kwargs):
     """
@@ -168,45 +181,48 @@ def forecasting_model(**kwargs):
         kwargs: dictionary containing click paramters used by the script
     Returns: None 
     """
-    # Auto log all MLflow entities
-    mlflow.pytorch.autolog()
+    with mlflow.start_run(run_name="ensemble",nested=True) as ensemble_start:
 
-    # store mlflow metrics/artifacts on temp file
-    ensemble_tmpdir = tempfile.mkdtemp()
+        # Auto log all MLflow entities
+        mlflow.pytorch.autolog()
 
-    global click_params
-    click_params = ClickParams(kwargs)
+        # store mlflow metrics/artifacts on temp file
+        ensemble_tmpdir = tempfile.mkdtemp()
 
-    print("=================== Click Params ===================")
-    print(vars(click_params))
+        global click_params
+        click_params = ClickParams(kwargs)
 
-    #  read csv files
-    df = read_csvs(click_params)
-    df_backup = df.copy()
+        print("=================== Click Params ===================")
+        print(vars(click_params))
 
-    # split data in train/test/validation
-    global train_data, test_data, val_data
-    train_data, test_data, val_data = train_test_valid_split(df)
+        #  read csv files
+        df = read_csvs(click_params)
+        df_backup = df.copy()
 
-    train_data.to_csv(f"{ensemble_tmpdir}/train_data.csv")
-    test_data.to_csv(f"{ensemble_tmpdir}/test_data.csv")
-    val_data.to_csv(f"{ensemble_tmpdir}/val_data.csv")
+        # split data in train/test/validation
+        global train_data, test_data, val_data
+        train_data, test_data, val_data = train_test_valid_split(df)
 
-    # train model with hparams set to best_params of optuna 
-    plot_pred, plot_actual = ensemble(load=False)
-    # plot_pred, plot_actual = sklearn_regress()
+        # train_data.to_csv(f"{ensemble_tmpdir}/train_data.csv")
+        # test_data.to_csv(f"{ensemble_tmpdir}/test_data.csv")
+        # val_data.to_csv(f"{ensemble_tmpdir}/val_data.csv")
 
-    # calculate metrics
-    metrics = calculate_metrics(plot_actual,plot_pred)
+        # train model with hparams set to best_params of optuna 
+        plot_pred, plot_actual = ensemble(load=False)
 
-    # plot prediction/actual data on common axis system 
-    cross_plot_pred_data(df_backup, plot_pred, plot_actual, ensemble_tmpdir)
+        # calculate metrics
+        metrics = calculate_metrics(plot_actual,plot_pred)
 
-    print("\nUploading training csvs and metrics to MLflow server...")
-    logging.info("\nUploading training csvs and metrics to MLflow server...")
-    mlflow.set_tag("stage", "ensemble")
-    mlflow.log_artifacts(ensemble_tmpdir, "ensemble_results")
-    mlflow.log_metrics(metrics)
+        # plot prediction/actual data on common axis system 
+        cross_plot_pred_data(df_backup, plot_pred, plot_actual, ensemble_tmpdir)
+
+        print("\nUploading training csvs and metrics to MLflow server...")
+        logging.info("\nUploading training csvs and metrics to MLflow server...")
+        mlflow.set_tag("run_id", ensemble_start.info.run_id)        
+        mlflow.set_tag("stage", "ensemble")
+        mlflow.log_params(kwargs)
+        mlflow.log_artifacts(ensemble_tmpdir, "ensemble_results")
+        mlflow.log_metrics(metrics)
 
 if __name__ == '__main__':
     print("\n=========== Ensemble Model =============")

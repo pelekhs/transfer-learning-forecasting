@@ -556,8 +556,10 @@ def store_with_local_time():
     dir_in = click.get_current_context().params["dir_in"] # make click argument accessible by function
     tmp_folder = click.get_current_context().params["tmp_folder"] # make click argument accessible by function
 
-    dateparse = lambda x: datetime.strptime(x, '%Y-%m-%d %H:%M:%S%z')
+    country_ts = {}
 
+    dateparse = lambda x: datetime.strptime(x, '%Y-%m-%d %H:%M:%S%z')
+    
     # For every csv file in folder 
     for root, dirs, files in os.walk(dir_in):
         for name in files:
@@ -574,13 +576,25 @@ def store_with_local_time():
             temp_df.set_index('Date', inplace=True) #set 'Date' as index (neeed for 'read_and_validate...') 
             temp_df.sort_index(ascending=True, inplace=True)
 
-            if country_name in name:
-                temp_df.to_csv(f"{tmp_folder}{name}")
-                print(f'Store to file \"{name}\"')
+            # dictionary country_ts has a key for every country and value
+            # the appended dataframes of all csv files related to that country
+            if country_name in country_ts: 
+                country_df = country_ts[country_name]
+                country_df = pd.concat([country_df,temp_df]) 
+                # country_ts[country_name].append(temp_df)
             else:
-                new_name = name.replace(country_code,country_name)
-                temp_df.to_csv(f"{tmp_folder}{new_name}")
-                print(f'Store to file \"{new_name}\"')
+                country_ts[country_name] = temp_df.copy()
+
+    for country in country_ts:
+        country_ts[country].to_csv(f"{tmp_folder}{country}.csv")
+
+            # if country_name in name:
+            #     temp_df.to_csv(f"{tmp_folder}{name}")
+            #     print(f'Store to file \"{name}\"')
+            # else:
+            #     new_name = name.replace(country_code,country_name)
+            #     temp_df.to_csv(f"{tmp_folder}{new_name}")
+            #     print(f'Store to file \"{new_name}\"')
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Click ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -618,7 +632,8 @@ def store_with_local_time():
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Main ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 def etl(dir_in, dir_out, tmp_folder, local_tz):
-    with mlflow.start_run(run_name='etl', nested=True) as mlrun:
+
+    with mlflow.start_run(run_name='etl', nested=True) as etl_start:
         mlflow.set_tag("stage", "etl")
 
         # countries = csv_names.split(',')
@@ -672,9 +687,9 @@ def etl(dir_in, dir_out, tmp_folder, local_tz):
             print ("Error: %s - %s." % (e.filename, e.strerror))
 
         # mlflow tags
-        mlflow.set_tag("run_id", mlrun.info.run_id)
+        mlflow.set_tag("run_id", etl_start.info.run_id)
         mlflow.set_tag("stage", "etl")
-        mlflow.set_tag('series_uri', f'{mlrun.info.artifact_uri}/features/series.csv')
+        mlflow.set_tag('series_uri', f'{etl_start.info.artifact_uri}/features/series.csv')
         mlflow.set_tag("dir_out", dir_out)
         mlflow.set_tag("dir_in", dir_in)        
 
