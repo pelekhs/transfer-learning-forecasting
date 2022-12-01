@@ -87,7 +87,6 @@ def _get_or_run(entrypoint, parameters, ignore_previous_run=False, use_cache=Tru
             logging.warning(f"Found existing run (with ID={existing_run.info.run_id}) for entrypoint={entrypoint} and parameters={parameters}")
             return existing_run
     print("Launching new run for entrypoint=%s and parameters=%s" % (entrypoint, parameters))
-    print(f"Parameters: {parameters}")
     submitted_run = mlflow.run(".", entrypoint,
                                 parameters=parameters,
                                 env_manager="local")
@@ -197,7 +196,7 @@ def workflow(**kwargs):
                 train_params = mlflow.artifacts.download_artifacts(best_trial_path)
                 train_params = pickle.load( open(train_params, 'rb') )
 
-                print(f'"params: {optuna_run.data.params}')
+                # print(f'"params: {optuna_run.data.params}')
 
                 train_params['transfer_mode'] = kwargs['transfer_mode']
                 train_params['countries'] = kwargs['countries'] ############################

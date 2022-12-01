@@ -6,6 +6,8 @@ from matplotlib import pyplot as plt
 # import matplotlib as mpl
 # mpl.use("webagg")
 import warnings
+# warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
+
 import sys
 import copy
 
@@ -98,8 +100,22 @@ class ClickParams:
         except ValueError:
             return False
 
-#### Define the model and hyperparameters
+def search_proper_run():
+    # find best pretrained model by searching runs with
+    # search only runs in 'model' stage and without transfer learning
+    filter_string = f'tags.stage = "model" and tags.transfer = "NO_TRANSFER"' 
+    best_run = mlflow.search_runs(experiment_names=["alex_trash"],
+                                  output_format='list',
+                                  filter_string=filter_string,
+                                  run_view_type=ViewType.ACTIVE_ONLY,
+                                  max_results=1,
+                                # order_by=["metrics.MAPE DESC"]
+                                  order_by=['attribute.end_time DESC']
+                                  )[0]
+    print(f"Found best model run with ID: {best_run.info.run_id}")
+    return best_run
 
+#### Define the model and hyperparameters
 class Regression(pl.LightningModule):
     """
     Regression  Techniques are used when the output is real-valued based on continuous variables. 
@@ -166,9 +182,12 @@ class Regression(pl.LightningModule):
             self.classifier = nn.Linear(last_dim, output_dim)
         else:
             # get best pretrained model and load its feature extractor
-            best_run = self.search_proper_run()
-            model = mlflow.pytorch.load_model(f"runs:/{best_run.info.run_id}/model") 
-
+            best_run = search_proper_run()
+            # model = mlflow.pytorch.load_model(f"runs:/{best_run.info.run_id}/model")
+            checkpoint_path = mlflow.artifacts.download_artifacts(f"runs:/{best_run.info.run_id}/train_results/checkpoint.ckpt")
+            print(f'checkpoint_path: {checkpoint_path}') 
+            model = Regression.load_from_checkpoint(checkpoint_path)
+            print('OK')
             # get dimension of last hidden layer of model (one before output)
             last_dim = model.hparams.layer_sizes[-1]
             self.feature_extractor = model.feature_extractor # "old" feature extractor
@@ -183,20 +202,6 @@ class Regression(pl.LightningModule):
                 # self.feature_extractor.eval() # disable dropout/BatchNorm layers using eval()
                 self.feature_extractor.requires_grad_(False) # freeze params
                 # self.feature_extractor.freeze() 
-
-    def search_proper_run(self):
-        # find best pretrained model by searching runs with best performance (MAPE)
-        # (NOT CORRECT, CHECK RUNS BASED ON WHAT CSVS ARE USED + PERFORMANCE) 
-        filter_string = f'tags.stage = "model"' # search only runs in 'model' stage
-        best_run = MlflowClient().search_runs(experiment_ids="0",
-                                              filter_string=filter_string,
-                                              run_view_type=ViewType.ACTIVE_ONLY,
-                                              max_results=1,
-                                              order_by=["metrics.MAPE DESC"]
-                                            #   order_by=['end_time DESC']
-                                              )[0]
-        print(f"Found best model run with ID: {best_run.info.run_id}")
-        return best_run
 
     def make_hidden_layers(self):
         """
@@ -237,7 +242,8 @@ class Regression(pl.LightningModule):
         target = torch.tensor(self.train_Y.values).float() #target tensor train_Y
         train_dataset = TensorDataset(feature, target)  # dataset bassed on feature/target
         train_loader = DataLoader(dataset = train_dataset, 
-                                  shuffle=True, 
+                                  shuffle = True, 
+                                  num_workers = 3,
                                   batch_size = self.hparams.batch_size)
         return train_loader
             
@@ -246,6 +252,7 @@ class Regression(pl.LightningModule):
         target = torch.tensor(self.test_Y.values).float()
         test_dataset = TensorDataset(feature, target)
         test_loader = DataLoader(dataset = test_dataset, 
+                                 num_workers = 3,
                                  batch_size = self.hparams.batch_size)
         return test_loader
 
@@ -254,6 +261,7 @@ class Regression(pl.LightningModule):
         target = torch.tensor(self.validation_Y.values).float()
         val_dataset = TensorDataset(feature, target)
         validation_loader = DataLoader(dataset = val_dataset,
+                                       num_workers = 3,
                                        batch_size = self.hparams.batch_size)
         return validation_loader
 
@@ -386,10 +394,6 @@ def train_test_valid_split(df):
     test_data = df[df['year'] == 2021][['Load']]
     val_data = df[df['year'] == 2020][['Load']]
 
-    # print("dataframe shape: {}".format(df.shape))
-    # print("train shape: {}".format(train_data.shape))
-    # print("test shape: {}".format(test_data.shape))
-    # print("validation shape: {}".format(val_data.shape))
     return train_data, test_data, val_data
 
 def feature_target_split(df, lookback_window=168, forecast_horizon=36):# lookback_window: 168 = 7 days(* 24 hours)

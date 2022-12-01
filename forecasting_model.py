@@ -16,13 +16,15 @@ import logging
 import click
 import mlflow
 import tempfile
+import shutil
+import os
 
 # Custom made classes and functions used for reading/processing data at input/output of model
 from model_utils import ClickParams, Regression, Transfer
 from model_utils import read_csvs, train_test_valid_split, \
                         feature_target_split, cross_plot_pred_data, calculate_metrics
 
-def train_test_best_model():
+def train_test_best_model(train_tmpdir):
     """
     This function is used to train and test our pytorch lightning model
     based on parameters give to it
@@ -36,7 +38,8 @@ def train_test_best_model():
     # layer_sizes must be iterable for creating model layers
     params['layer_sizes'] = [params['layer_sizes']] 
 
-    pl.seed_everything(click_params.seed, workers=True)    
+    pl.seed_everything(click_params.seed, workers=True)  
+      
     model = Regression(**params) # double asterisk (dictionary unpacking)
 
     max_epochs = None
@@ -55,14 +58,29 @@ def train_test_best_model():
 
     pl.utilities.model_summary.ModelSummary(model, max_depth=-1)
 
+    # mlflow.pytorch.log_state_dict(model.state_dict(), artifact_path="model")
+    # # Print model's state_dict
+    # print("Model's state_dict:")
+    # for param_tensor in model.state_dict():
+    #     print(param_tensor, "\t", model.state_dict()[param_tensor].size())
+
+    # Pytorch lighting uses checkpoints to store state of model
+    # the file containing checkpoint are create automatically in checkpoint_path
+    # we add this file as artifcact to mllflow to load them in our model
+    checkpoint_path = (
+            f'./lightning_logs/version_{trainer.logger.version}/checkpoints/'
+            f'epoch={trainer.current_epoch-1}-step={trainer.global_step}.ckpt'
+    )
+    shutil.copyfile(os.path.abspath(checkpoint_path), f"{train_tmpdir}/checkpoint.ckpt")
+
     # mlflow.pytorch.log_model(model, "model")
 
     # Either best or path to the checkpoint you wish to test. 
     # If None and the model instance was passed, use the current weights. 
     # Otherwise, the best model from the previous trainer.fit call will be loaded.
-    trainer.test()
+    trainer.test(ckpt_path='best')
 
-    trainer.validate()
+    trainer.validate(ckpt_path='best')
 
     preds = trainer.predict(ckpt_path='best')
     actuals = []
@@ -164,7 +182,7 @@ def forecasting_model(**kwargs):
         # val_data.to_csv(f"{train_tmpdir}/val_data.csv")
 
         # train model with hparams set to best_params of optuna 
-        plot_pred, plot_actual = train_test_best_model()
+        plot_pred, plot_actual = train_test_best_model(train_tmpdir)
         # plot_pred, plot_actual = sklearn_regress()
 
         # calculate metrics
