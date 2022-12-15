@@ -38,31 +38,23 @@ def train_test_best_model(train_tmpdir):
     # layer_sizes must be iterable for creating model layers
     params['layer_sizes'] = [params['layer_sizes']] 
 
+    torch.set_num_threads(click_params.num_workers)
     pl.seed_everything(click_params.seed, workers=True)  
       
     model = Regression(**params) # double asterisk (dictionary unpacking)
 
     max_epochs = None
-    if(model.transfer_mode == Transfer.BOUNDED_EPOCHS):
-        max_epochs = 5 # bounded epochs
-    else:
-        max_epochs = params['max_epochs']
+    max_epochs = 5 if(model.transfer_mode == Transfer.BOUNDED_EPOCHS) \
+                   else params['max_epochs']
 
     trainer = Trainer(max_epochs=max_epochs, auto_scale_batch_size=None, 
                     #   profiler="simple", #add simple profiler
                     callbacks=[EarlyStopping(monitor="val_loss", mode="min", verbose=True)],
-                    gpus=0 if torch.cuda.is_available() else None,
                     deterministic=True) 
 
     trainer.fit(model)
 
     pl.utilities.model_summary.ModelSummary(model, max_depth=-1)
-
-    # mlflow.pytorch.log_state_dict(model.state_dict(), artifact_path="model")
-    # # Print model's state_dict
-    # print("Model's state_dict:")
-    # for param_tensor in model.state_dict():
-    #     print(param_tensor, "\t", model.state_dict()[param_tensor].size())
 
     # Pytorch lighting uses checkpoints to store state of model
     # the file containing checkpoint are create automatically in checkpoint_path
@@ -146,6 +138,7 @@ def sklearn_regress():
 @click.option("--optimizer_name", type=str, default="Adam", help='optimizers experimented by the model') # SGD
 @click.option("--batch_size", type=str, default="200", help='possible batch sizes used by the model') #16,32,
 @click.option("--transfer_mode", type=str, default="0", help='indicator to use transfer learning techniques')
+@click.option("--num_workers", type=str, default="3", help='accelerator (cpu/gpu) processesors and threads used') 
 
 def forecasting_model(**kwargs):
     """
@@ -193,12 +186,14 @@ def forecasting_model(**kwargs):
 
         print("\nUploading training csvs and metrics to MLflow server...")
         logging.info("\nUploading training csvs and metrics to MLflow server...")
-        mlflow.set_tag("run_id", train_start.info.run_id)        
-        mlflow.set_tag("stage", "model")
-        mlflow.set_tag("transfer", Transfer(click_params.transfer_mode).name)
         mlflow.log_params(kwargs)
         mlflow.log_artifacts(train_tmpdir, "train_results")
         mlflow.log_metrics(metrics)
+        mlflow.set_tag("run_id", train_start.info.run_id)        
+        mlflow.set_tag('checkpoint_uri', f'{train_start.info.artifact_uri}/train_results//checkpoint.ckpt')
+        mlflow.set_tag("stage", "model")
+        mlflow.set_tag("transfer", Transfer(click_params.transfer_mode).name)
+
 
 if __name__ == '__main__':
     print("\n=========== Forecasing Model =============")

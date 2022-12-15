@@ -22,8 +22,13 @@ import dateutil
 import pathlib
 import click
 import shutil
+import tempfile
 import mlflow
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Globals ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+tmp_folder = None
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Functions ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 """
 Αρχικά ορίζεται η συνάρτηση read_and_validate_input που διαβάζει τα αρχεία και ελέγχει αν είναι σωστά. 
 Πιο συγκεκριμένα, προκύπτει Exception αν το αρχείο δεν έχει ημερομηνίες σε αύξουσα σειρά 
@@ -120,6 +125,7 @@ def sort_csvs(series_csv: str = "Load_Data/2009-2019-global-load.csv",
 
 def merge_country_csvs(): # previously know 'read_csvs'
     dir_in = click.get_current_context().params["dir_in"] # make click argument accessible by function
+    countries = click.get_current_context().params["countries"]
     country_names = list(map(lambda country : country.name, pycountry.countries))
     country_codes = list(map(lambda country : country.alpha_2, pycountry.countries))
     country_ts = {}
@@ -127,6 +133,12 @@ def merge_country_csvs(): # previously know 'read_csvs'
     
     for root, dirs, files in os.walk(dir_in):
         for name in files:
+            # if name has country in list, then add for preprocessing
+            # country_name, country_code = find_country(name)
+            # if(not (country_name in countries.split(',') or country_code in countries.split(','))):
+            #     print(f'Country \"{country_name}\" not in list for preprocessing. Ignoring...')
+            #     continue
+
             if os.path.splitext(name)[1] == ".csv":
                 print(f"~~~Now processing file: {name}~~~")
                 logging.info(f"~~~Now processing file: {name}~~~")
@@ -158,16 +170,17 @@ def merge_country_csvs(): # previously know 'read_csvs'
 def save_results(country_ts, country_file_to_name):
     multiple_ts = []
     names = []
-    tmp_folder = click.get_current_context().params["tmp_folder"] # make click argument accessible by function
+    global tmp_folder
 
     for country in country_ts:
         ts = country_ts[country][0]
         #Add all ts's of the same country together
         for df in country_ts[country][1:]:
-            ts = ts + df
-        ts.to_csv(f"{tmp_folder}{country}.csv")
+            ts = ts + df        
+        ts.to_csv(f"{tmp_folder}/{country}.csv")
         multiple_ts.append(ts)
-        names.append(f"{tmp_folder}{country}.csv")
+        names.append(f"{tmp_folder}/{country}.csv")
+        print(names)
     return multiple_ts, names
 
 # country_ts, country_file_to_name = merge_country_csvs()
@@ -245,17 +258,18 @@ def remove_outliers(ts: pd.DataFrame,
     return res.asfreq('1H')
 
 def read_csvs():
-    tmp_folder = click.get_current_context().params["tmp_folder"] # make click argument accessible by function
     multiple_ts = []
     names = []
     result= {}
     raw_result = {}
+    global tmp_folder
+
+
     for root, dirs, files in os.walk(tmp_folder):
         for name in files:
             ts = read_and_validate_input(os.path.join(root, name))
             ts = ts[~ts.index.duplicated(keep='first')]
             ts = ts.asfreq('1H')
-            # print("Removing outliers...")
             result[name] = remove_outliers(ts, name)
             raw_result[name] = ts
     return result, raw_result
@@ -317,11 +331,6 @@ def create_calendar(timeseries, timestep_minutes, holiday_list, local_timezone):
         # first convert to utc and then to timestamp
         calendar['timestamp'] = calendar['datetime'].apply(
             lambda x: local_timezone.localize(x).replace(tzinfo=pytz.utc).timestamp()).astype(int)
-
-    # national_holidays = Province(name="valladolid").national_holidays()
-    # regional_holidays = Province(name="valladolid").regional_holidays()
-    # local_holidays = Province(name="valladolid").local_holidays()
-    # holiday_list = national_holidays + regional_holidays + local_holidays
 
     calendar['holiday'] = calendar['datetime'].apply(
         lambda x: isholiday(x.date(), holiday_list))
@@ -432,16 +441,12 @@ def impute(ts: pd.DataFrame,
             else:
                 count = 1
 
-    # max_consecutive_nans = 0
-
     #We mark this subseries so that it does not get imputed
     for i in range(len(null_dates)):
         if d[i] == max_thhr // 2:
             for ii in range(max(0, i - max_thhr // 2 + 1), min(i + max_thhr // 2, len(null_dates))):
                 leave_nan[ii] = True
         elif d[i] > max_thhr // 2:
-            if(d[i] > max_consecutive_nans):
-                max_consecutive_nans = d[i]
             leave_nan[i] = True
                 
     #This is the interpolated version of the time series
@@ -475,11 +480,6 @@ def impute(ts: pd.DataFrame,
         
         #imputed value is calculated as a wheighted average of the histrorical value and the value from intrepolation
         res.loc[null_date] = w * ts_interpolatied.loc[null_date] + (1 - w) * historical
-        
-        # if debug:
-        #     print(res.loc[null_date])
-
-    # print("----------------------------- NaN values in dataframe: "+str(res.isnull().sum().sum()))
 
     # merge callendar with res
     res_with_calendar = res.merge(calendar,left_index=True, right_index=True, how = 'inner')
@@ -523,6 +523,8 @@ def find_country(filename):
         country_code = pycountry.countries.search_fuzzy(cand_countries[0])[0].alpha_2
         print(f"File \"{filename}\" belongs to \"{country_name}\" with code \"{country_code}\"")
         return country_name, country_code
+    else:
+        return None, None
 
 from pytz import country_timezones
 
@@ -532,9 +534,6 @@ def utc_to_local(temp_df, country_code):
                             for country, timezones in country_timezones.items()
                             for timezone in timezones}
     local_timezone = timezone_countries[country_code]
-
-    # reset timezone info
-    # temp_df['Start'] = temp_df['Start'].dt.tz_convert(None)
 
     # convert dates to given timezone, get timezone info
     temp_df['Start'] = temp_df['Start'].dt.tz_convert(local_timezone)
@@ -554,22 +553,26 @@ def utc_to_local(temp_df, country_code):
 
 def store_with_local_time():
     dir_in = click.get_current_context().params["dir_in"] # make click argument accessible by function
-    tmp_folder = click.get_current_context().params["tmp_folder"] # make click argument accessible by function
-
+    countries = click.get_current_context().params["countries"]
     country_ts = {}
+    global tmp_folder
 
     dateparse = lambda x: datetime.strptime(x, '%Y-%m-%d %H:%M:%S%z')
     
     # For every csv file in folder 
     for root, dirs, files in os.walk(dir_in):
         for name in files:
+            # if name has country in list, then add for preprocessing
+            country_name, country_code = find_country(name)
+            # if(not (country_name in countries.split(',') or country_code in countries.split(','))):
+            #     print(f'Country \"{country_name}\" not in list for preprocessing. Ignoring...')
+            #     continue
+
             print("Loading dataset: "+name)
             temp_df = pd.read_csv(os.path.join(root, name),
                                 parse_dates=['Start'],
                                 dayfirst=True,
                                 date_parser=dateparse)
-            country_name, country_code = find_country(name)
-            # temp_df['country'], temp_df['code']  = country_name, country_code                                        
             utc_to_local(temp_df, country_code) # convert 'Start' column from utc to local datetime 
             temp_df.rename(columns={"Start": "Date"}, errors="raise", inplace=True) #rename column 'Start' to 'Date'
             temp_df = temp_df[['Date','Load']] # keep only 'Date' and 'Load' columns
@@ -581,20 +584,11 @@ def store_with_local_time():
             if country_name in country_ts: 
                 country_df = country_ts[country_name]
                 country_df = pd.concat([country_df,temp_df]) 
-                # country_ts[country_name].append(temp_df)
             else:
                 country_ts[country_name] = temp_df.copy()
 
     for country in country_ts:
-        country_ts[country].to_csv(f"{tmp_folder}{country}.csv")
-
-            # if country_name in name:
-            #     temp_df.to_csv(f"{tmp_folder}{name}")
-            #     print(f'Store to file \"{name}\"')
-            # else:
-            #     new_name = name.replace(country_code,country_name)
-            #     temp_df.to_csv(f"{tmp_folder}{new_name}")
-            #     print(f'Store to file \"{new_name}\"')
+        country_ts[country].to_csv(f"{tmp_folder}/{country}.csv")
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Click ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -608,90 +602,76 @@ def store_with_local_time():
     default="../original_data/",
     help="Local directory where original timeseries csvs are stored"
 )
-@click.option("--dir_out",
+@click.option("--countries",
     type=str,
-    default="../preprocessed_data/",
-    help="Local directory where preprocessed timeseries csvs will be stored"
-)
-@click.option("--tmp_folder",
-    type=str,
-    default="../tmp_data/",    
-    help="Temporary directory to store merged-countries data with no outliers (not yet imputed)"
+    default="Portugal",
+    help="csv file names to be used for preprocessing"
 )
 @click.option("--local_tz",
     type=bool,
     default=True,    
     help="flag if you want local (True) or UTC (False) timezone"
 )
-# @click.option("--csv_names", '-csv', 
-#     default='csv_all',   
-#     multiple=True,
-#     help="csv files I want to use for preprocesssing" 
-# )
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Main ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-def etl(dir_in, dir_out, tmp_folder, local_tz):
+def etl(**kwargs):
 
     with mlflow.start_run(run_name='etl', nested=True) as etl_start:
         mlflow.set_tag("stage", "etl")
 
-        # countries = csv_names.split(',')
-        print(dir_in, dir_out)
-        # print(countries)
-
-        if not os.path.exists(dir_out): os.makedirs(dir_out) #create output directory if not exists
-
         # set as global because they are used by most function
-        global country_ts, country_file_to_name, multiple_ts, names
+        global country_ts, country_file_to_name, multiple_ts, names, tmp_folder
 
-        if not os.path.exists(tmp_folder):
-            os.makedirs(tmp_folder) #create tmp directory if not exists
-
+        # Temporary directory to store merged-countries data with no outliers (not yet imputed)
+        with tempfile.TemporaryDirectory() as tmp_folder: 
             """
             if we want our data to be based on local timezone of 
             their country of origin
             """   
-            if(local_tz):
+            if(kwargs['local_tz']):
                 store_with_local_time()
             else: 
-                # these two lines where outside of function in vanilla script
                 country_ts, country_file_to_name = merge_country_csvs()
                 multiple_ts, names = save_results(country_ts, country_file_to_name)
+            
+            for filename in os.listdir(tmp_folder):
+                f = os.path.join(tmp_folder, filename)
+                # checking if it is a file
+                if os.path.isfile(f):
+                    print(f)            
+            result, raw_result = read_csvs() # read csv files and remove outliers
 
-        result, raw_result = read_csvs() # read csv files and remove outliers
+            # create temporary directory to store datasets after inputation
+            preprocessed_tmpdir = tempfile.mkdtemp()
 
-        for root, dirs, files in os.walk(tmp_folder):
-            for name in files:
-                # if any(string in countries for string in ('csv_all', csv.stem)):
-                print(f'Inputing data of csv: "{name}"')
-                logging.info(f'\nInputing data of csv: "{name}"')
-                
-                country = None
-                if(local_tz):
-                    country, country_code = find_country(name)
-                else:
-                    country = pathlib.Path(name).stem #find country of csv (its name given the circumstances)
-                code = compile(f"holidays.{country}()", "<string>", "eval") #find country's holidays
-                holidays_ = eval(code)
-                res, null_dates = impute(result[f"{name}"], holidays_, 5000, 0.2, debug=False) # impute datasets and
+            for root, dirs, files in os.walk(tmp_folder):
+                for name in files:
+                    # if any(string in countries for string in ('csv_all', csv.stem)):
+                    print(f'Inputing data of csv: "{name}"')
+                    logging.info(f'\nInputing data of csv: "{name}"')
+                    
+                    country = None
+                    if(kwargs['local_tz']):
+                        country, country_code = find_country(name)
+                    else:
+                        country = pathlib.Path(name).stem #find country of csv (its name given the circumstances)
+                    code = compile(f"holidays.{country}()", "<string>", "eval") #find country's holidays
+                    holidays_ = eval(code)
+                    res, null_dates = impute(result[f"{name}"], holidays_, 5000, 0.2, debug=False) # impute datasets and
 
-                print(f'Stored to "{dir_out}{name}"')
-                logging.info(f'Stored to "{dir_out}{name}"')
-                res.to_csv(f"{dir_out}{name}") #store them on seperate folder
+                    print(f'Stored to "{ preprocessed_tmpdir }/{name}"')
+                    logging.info(f'Stored to "{preprocessed_tmpdir}/{name}"')
+                    res.to_csv(f"{preprocessed_tmpdir}/{name}") #store them on seperate folder
 
-        # delete temp folder and all its contents
-        try:
-            shutil.rmtree(tmp_folder)
-        except OSError as e:
-            print ("Error: %s - %s." % (e.filename, e.strerror))
-
-        # mlflow tags
-        mlflow.set_tag("run_id", etl_start.info.run_id)
-        mlflow.set_tag("stage", "etl")
-        mlflow.set_tag('series_uri', f'{etl_start.info.artifact_uri}/features/series.csv')
-        mlflow.set_tag("dir_out", dir_out)
-        mlflow.set_tag("dir_in", dir_in)        
+                # mlflow tags
+                print("\nUploading training csvs and metrics to MLflow server...")
+                logging.info("\nUploading training csvs and metrics to MLflow server...")
+                mlflow.log_params(kwargs)
+                mlflow.log_artifacts(preprocessed_tmpdir, "preprocessed_data")
+                mlflow.set_tag("run_id", etl_start.info.run_id)
+                mlflow.set_tag("stage", "etl")
+                mlflow.set_tag('outdir_uri', f'{etl_start.info.artifact_uri}/preprocessed_data')
 
 if __name__ == '__main__':
     print("\n=========== ETL =============")

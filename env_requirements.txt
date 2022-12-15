@@ -4,7 +4,7 @@ datetime
 pandas==1.4.3
 numpy==1.22.4
 matplotlib==3.5.3
-darts==0.21.0
+u8darts[torch]==0.21.0
 holidays==0.14.2
 pycountry==22.3.5
 python-dateutil==2.8.2 # dateutil
@@ -28,3 +28,5 @@ statsmodels==0.13.2
 # pickle==4.0
 torchensemble==0.1.9
 python-dotenv==0.21.0
+tornado-6.2
+boto3==1.26.29 #remote storage of minio

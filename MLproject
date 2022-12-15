@@ -6,11 +6,10 @@ entry_points:
   main:
     parameters:
       stages: {type: str, default: 'all'}
-      dir_in: {type: str, default: '../preprocessed_data/'}
-      dir_out: {type: str, default: '../preprocessed_data/'}
-      tmp_folder: {type: str, default: '../tmp_data/'}
+      dir_in: {type: str, default: '../original_data/'}
       local_tz: {type: bool, default: False}
-      countries: {type: str, default: 'Portugal'}
+      src_countries: {type: str, default: 'Portugal'}
+      tgt_countries: {type: str, default: 'Portugal'}
       seed: {type: str, default: '42'}
       n_trials: {type: str, default: '20'}
       max_epochs: {type: str, default: '200'}
@@ -23,14 +22,15 @@ entry_points:
       optimizer_name: {type: str, default: 'Adam'}
       batch_size: {type: str, default: '200'}
       transfer_mode: {type: str, default: "0"}
+      num_workers: {type: str, default: '3'}
       n_estimators: {type: str, default: '3'}
+      test_case: {type: str, default: '1'}
     command: "python main.py \
               --stages {stages} \
               --dir_in {dir_in} \
-              --dir_out {dir_out} \
               --local_tz {local_tz} \
-              --tmp_folder {tmp_folder} \
-              --countries {countries} \
+              --src_countries {src_countries} \
+              --tgt_countries {tgt_countries} \
               --seed {seed} \
               --n_trials {n_trials} \
               --max_epochs {max_epochs} \
@@ -43,19 +43,27 @@ entry_points:
               --optimizer_name {optimizer_name} \
               --batch_size {batch_size} \
               --transfer_mode {transfer_mode} \
-              --n_estimators {n_estimators}"  
+              --num_workers {num_workers} \
+              --n_estimators {n_estimators} \
+              --test_case {test_case}"  
+
+  load:
+      parameters:
+        dir_in: {type: str, default: '../original_data/'}
+        countries: {type: str, default: 'Portugal'}
+      command: "python load_raw_data.py \
+                --countries {countries} \
+                --dir_in {dir_in}"
 
   etl:
     parameters:
       dir_in: {type: str, default: '../original_data/'}
-      dir_out: {type: str, default: '../preprocessed_data/'}
-      tmp_folder: {type: str, default: '../tmp_data/'}
       local_tz: {type: bool, default: False}
+      countries: {type: str, default: 'Portugal'}
     command: "python etl.py \
               --dir_in {dir_in} \
-              --dir_out {dir_out} \
-              --local_tz {local_tz} \
-              --tmp_folder {tmp_folder} "
+              --countries {countries} \
+              --local_tz {local_tz} "
 
   optuna:
     parameters:
@@ -69,8 +77,9 @@ entry_points:
       f_horizon: {type: str, default: '36,48'}
       l_rate: {type: str, default: '0.00001,0.1'}
       activation: {type: str, default: 'ReLU,SiLU'}
-      optimizer_name: {type: str, default: 'Adam,RMSprop,SGD'}
+      optimizer_name: {type: str, default: 'Adam,RMSprop,SGD'}      
       batch_size: {type: str, default: '16,32,64,128,256'}
+      num_workers: {type: str, default: '3'}
     command: "python forecasting_model_optuna.py \
               --dir_in {dir_in} \
               --seed {seed} \
@@ -83,6 +92,7 @@ entry_points:
               --l_rate {l_rate} \
               --activation {activation} \
               --optimizer_name {optimizer_name} \
+              --num_workers {num_workers} \              
               --batch_size {batch_size} "
 
   model:
@@ -100,6 +110,7 @@ entry_points:
       optimizer_name: {type: str, default: 'Adam'}
       batch_size: {type: str, default: '200'}
       transfer_mode: {type: str, default: "0"}
+      num_workers: {type: str, default: "3"}
     command: "python forecasting_model.py \
               --dir_in {dir_in} \
               --countries {countries} \
@@ -113,6 +124,7 @@ entry_points:
               --activation {activation} \
               --optimizer_name {optimizer_name} \
               --batch_size {batch_size} \
+              --num_workers {num_workers} \
               --transfer_mode {transfer_mode} "      
 
   ensemble:
@@ -131,6 +143,7 @@ entry_points:
       batch_size: {type: str, default: '200'}
       transfer_mode: {type: str, default: "0"}
       n_estimators: {type: str, default: '3'}
+      num_workers: {type: str, default: '3'}
     command: "python forecasting_model_ensemble.py \
               --dir_in {dir_in} \
               --countries {countries} \
@@ -145,4 +158,5 @@ entry_points:
               --optimizer_name {optimizer_name} \
               --batch_size {batch_size} \
               --transfer_mode {transfer_mode} \
+              --num_workers {num_workers} \
               --n_estimators {n_estimators}"

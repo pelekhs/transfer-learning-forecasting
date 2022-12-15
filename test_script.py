@@ -38,7 +38,9 @@ def case_1(params,domain):
         print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")       
         command = (
             f'mlflow run . --env-manager=local -P stages={params.stages} '
-            f'-P countries={country} -P transfer_mode=0 --experiment-name=alex_trash'
+            f'-P src_countries={country} -P transfer_mode=0 -P test_case=1 ' ## add/remove max_epochs
+            f'-P max_epochs=2 -P n_trials=2 '
+            f'--experiment-name={params.experiment_name}'
         )     
         print(command)
         os.system(command)
@@ -50,7 +52,7 @@ def case_2(params,source_domain,target_domain):
         Target domain: 1 (remaining) country
     """
     print("=============== Case 2 ===============")        
-    # counter = 0
+    counter = 0
     for src, tgt in zip(source_domain,target_domain):
         print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
         print(f"Source Domain: {src}")
@@ -58,20 +60,15 @@ def case_2(params,source_domain,target_domain):
         print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")   
         command = (
             f'mlflow run . --env-manager=local -P stages={params.stages} '
-            f'-P countries={src} -P transfer_mode=0 '
-            f'--experiment-name={params.experiment_name}1'
+            f'-P src_countries={src} -P tgt_countries={tgt} -P test_case=2 '
+            f'-P transfer_mode={params.transfer_mode} ' ## add/remove max_epochs
+            f'-P max_epochs=2 -P n_trials=2 '
+            f'--experiment-name={params.experiment_name}'
         )     
         print(command)
         os.system(command)
-        command = (
-            f'mlflow run . --env-manager=local -P stages={params.stages} '
-            f'-P countries={tgt} -P transfer_mode={params.transfer_mode} '
-            f'--experiment-name={params.experiment_name}1'
-        )
-        print(command)
-        os.system(command)
-        # counter+= 1
-        # if(counter > 0): break;
+        counter+= 1
+        if(counter > 0): break;
 
 #### Enum used to define test case used in run of test_script  
 class TestCase(IntEnum):

@@ -64,6 +64,7 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
         predictions:  1-D list containing predictions for said labels
     """
 
+    torch.set_num_threads(click_params.num_workers)
     pl.seed_everything(click_params.seed, workers=True)  
 
     best_params = {}; best_params.update(vars(click_params)); del best_params['n_estimators']
@@ -95,7 +96,8 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
         ensemble_model = torchensemble.BaggingRegressor(
             estimator=regression_model,
             n_estimators=click_params.n_estimators,
-            cuda=False
+            cuda=True if torch.cuda.is_available() else False, ##################
+            n_jobs=click_params.num_workers if torch.cuda.is_available() else None #################
         )
 
         ensemble_model.set_optimizer(optimizer_name=click_params.optimizer_name,
@@ -169,6 +171,7 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
 @click.option("--batch_size", type=str, default="200", help='possible batch sizes used by the model') #16,32,
 @click.option("--transfer_mode", type=str, default="0", help='indicator to use transfer learning techniques')
 @click.option("--n_estimators", type=str, default="3", help='number of estimators (models) used in ensembling')
+@click.option("--num_workers", type=str, default="3", help='accelerator (cpu/gpu) processesors and threads used') 
 
 def forecasting_model(**kwargs):
     """
@@ -218,11 +221,12 @@ def forecasting_model(**kwargs):
 
         print("\nUploading training csvs and metrics to MLflow server...")
         logging.info("\nUploading training csvs and metrics to MLflow server...")
-        mlflow.set_tag("run_id", ensemble_start.info.run_id)        
-        mlflow.set_tag("stage", "ensemble")
         mlflow.log_params(kwargs)
         mlflow.log_artifacts(ensemble_tmpdir, "ensemble_results")
         mlflow.log_metrics(metrics)
+        mlflow.set_tag("run_id", ensemble_start.info.run_id)
+        mlflow.set_tag('ensemble_model_uri', f'{ensemble_start.info.artifact_uri}/ensemble_model')
+        mlflow.set_tag("stage", "ensemble")
 
 if __name__ == '__main__':
     print("\n=========== Ensemble Model =============")

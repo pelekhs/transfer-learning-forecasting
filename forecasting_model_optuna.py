@@ -75,10 +75,9 @@ def objective(trial):
         'l_rate':    trial.suggest_float('l_rate', click_params.l_rate[0], click_params.l_rate[1], log=True), # loguniform will become deprecated
         'activation': trial.suggest_categorical("activation", click_params.activation), #SiLU (Swish) performs good
         'optimizer_name': trial.suggest_categorical("optimizer_name", click_params.optimizer_name),
-        'batch_size': trial.suggest_categorical('batch_size', click_params.batch_size)
+        'batch_size': trial.suggest_categorical('batch_size', click_params.batch_size),
+        'num_workers': click_params.num_workers
     }
-    print(params)
-    print(f"max_epochs: {max_epochs}")
 
     # The default logger in PyTorch Lightning writes to event files to be consumed by
     # TensorBoard. We create a simple logger instead that holds the log in memory so that the
@@ -86,10 +85,10 @@ def objective(trial):
     # final accuracy could be stored in an attribute of the `Trainer` instead.
     trainer = Trainer(max_epochs=max_epochs, auto_scale_batch_size=None, logger=True,
                     #   profiler="simple", #add simple profiler
-                      gpus=0 if torch.cuda.is_available() else None,
                       callbacks=[PyTorchLightningPruningCallback(trial, monitor="val_loss")],
                       deterministic=True)
 
+    torch.set_num_threads(click_params.num_workers)
     pl.seed_everything(click_params.seed, workers=True)    
     model = Regression(**params) # double asterisk (dictionary unpacking)
     trainer.logger.log_hyperparams(params)
@@ -224,6 +223,7 @@ def optuna_visualize(study):
 @click.option("--activation", type=str, default="ReLU,SiLU", help='activations function experimented by the model')
 @click.option("--optimizer_name", type=str, default="Adam,RMSprop", help='optimizers experimented by the model') # SGD
 @click.option("--batch_size", type=str, default="64,128,256,512", help='possible batch sizes used by the model') #16,32,
+@click.option("--num_workers", type=str, default="3", help='accelerator (cpu/gpu) processesors and threads used') 
 
 def forecasting_model(**kwargs):
     """
@@ -271,11 +271,12 @@ def forecasting_model(**kwargs):
 
         print("\nUploading training csvs and metrics to MLflow server...")
         logging.info("\nUploading training csvs and metrics to MLflow server...")
-        mlflow.set_tag("run_id", optuna_start.info.run_id)
-        mlflow.set_tag("stage", "optuna")
         mlflow.log_params(kwargs)
         mlflow.log_artifacts(opt_tmpdir, "optuna_results")
-
+        mlflow.set_tag("run_id", optuna_start.info.run_id)
+        mlflow.set_tag('best_trial_uri', f'{optuna_start.info.artifact_uri}/optuna_results/optuna_best_trial.pkl')
+        mlflow.set_tag("stage", "optuna")
+        
 if __name__ == '__main__':
     print("\n=========== Optuna Hyperparameter Tuning =============")
     logging.info("\n=========== Optuna Hyperparameter Tuning =============")

@@ -62,6 +62,12 @@ class Transfer(IntEnum):
     FREEZING = 3
     HEAD_REPLACEMENT = 4
 
+#### Enum used to define test case used in run of test_script  
+class TestCase(IntEnum):
+    BENCHMARK = 1
+    ALL_FOR_ONE = 2 
+    CLUSTER_FOR_ONE = 3
+
 #### Class used to store and utilize click arguments passed to the script
 class ClickParams:
     def __init__(self, click_args):
@@ -145,9 +151,11 @@ class Regression(pl.LightningModule):
         self.loss = MeanAbsolutePercentageError() #MAPE
 
         # by default, no transfer learning, init in case of optuna/ensemble        
-        self.transfer_mode = Transfer.NO_TRANSFER 
-        if('transfer_mode' in params): 
-            self.transfer_mode = Transfer(params['transfer_mode'])
+        self.transfer_mode = Transfer(params['transfer_mode']) if('transfer_mode'in params) \
+                             else Transfer.NO_TRANSFER 
+
+        # if('transfer_mode' in params): 
+        #     self.transfer_mode = Transfer(params['transfer_mode'])
 
         # enable Lightning to store all the provided arguments 
         # under the self.hparams attribute. 
@@ -175,10 +183,8 @@ class Regression(pl.LightningModule):
         self.classifier = None
 
         if(self.transfer_mode == Transfer.NO_TRANSFER):
-            print(f'input_dim: {input_dim}')
             feature_layers, last_dim = self.make_hidden_layers()
             self.feature_extractor = nn.Sequential(*feature_layers) #list of nn layers
-            print(f'last_dim: {last_dim}')
             self.classifier = nn.Linear(last_dim, output_dim)
         else:
             # get best pretrained model and load its feature extractor
@@ -243,7 +249,7 @@ class Regression(pl.LightningModule):
         train_dataset = TensorDataset(feature, target)  # dataset bassed on feature/target
         train_loader = DataLoader(dataset = train_dataset, 
                                   shuffle = True, 
-                                  num_workers = 3,
+                                  num_workers = self.hparams.num_workers,
                                   batch_size = self.hparams.batch_size)
         return train_loader
             
@@ -252,7 +258,7 @@ class Regression(pl.LightningModule):
         target = torch.tensor(self.test_Y.values).float()
         test_dataset = TensorDataset(feature, target)
         test_loader = DataLoader(dataset = test_dataset, 
-                                 num_workers = 3,
+                                 num_workers = self.hparams.num_workers,
                                  batch_size = self.hparams.batch_size)
         return test_loader
 
@@ -261,7 +267,7 @@ class Regression(pl.LightningModule):
         target = torch.tensor(self.validation_Y.values).float()
         val_dataset = TensorDataset(feature, target)
         validation_loader = DataLoader(dataset = val_dataset,
-                                       num_workers = 3,
+                                       num_workers = self.hparams.num_workers,
                                        batch_size = self.hparams.batch_size)
         return validation_loader
 
@@ -445,10 +451,7 @@ def feature_target_split(df, lookback_window=168, forecast_horizon=36):# lookbac
     
     df_new = pd.DataFrame(df_new, index=df_copy.index)
     df_new = df_new.dropna().reset_index(drop=True)    
-                        
-    # store new dataset to csv (if needed) 
-    df_new.to_csv("preprocess_for_model.csv")
-    
+                            
     return df_new.iloc[:,:lookback_window] , df_new.iloc[:,-forecast_horizon:]
 
 def cross_plot_pred_data(df_backup, plot_pred_r, plot_actual_r, tmpdir):
