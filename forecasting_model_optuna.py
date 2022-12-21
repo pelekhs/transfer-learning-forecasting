@@ -20,17 +20,23 @@ import pytorch_lightning as pl
 from pytorch_lightning import Trainer
 # from pytorch_lightning.profiler import Profiler, AdvancedProfiler
 
+import os
 import logging
 import pickle
 import click
 import mlflow
 
 from model_utils import ClickParams, Regression
-from model_utils import read_csvs, train_test_valid_split
+from model_utils import read_csvs, train_test_valid_split, feature_target_split
+
+# get environment variables
+from dotenv import load_dotenv
+load_dotenv()
+# explicitly set MLFLOW_TRACKING_URI as it cannot be set through load_dotenv
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI")
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Globals ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 click_params = None
-opt_tmpdir = None
 
 """
 This function is use by the Optuna library: An open source hyperparameter optimization framework
@@ -83,16 +89,33 @@ def objective(trial):
     # TensorBoard. We create a simple logger instead that holds the log in memory so that the
     # final accuracy can be obtained after optimization. When using the default logger, the
     # final accuracy could be stored in an attribute of the `Trainer` instead.
-    trainer = Trainer(max_epochs=max_epochs, auto_scale_batch_size=None, logger=True,
+    trainer = Trainer(max_epochs=max_epochs, deterministic=True, logger=True,
                     #   profiler="simple", #add simple profiler
-                      callbacks=[PyTorchLightningPruningCallback(trial, monitor="val_loss")],
-                      deterministic=True)
+                    #   precision=16, # employ half-precision whenever available while maintaining single-precision everywhere else
+                    #   accelerator='auto',
+                    #   devices = 1 if torch.cuda.is_available() else 0,
+                    #   auto_select_gpus=True if torch.cuda.is_available() else False,
+                    #   strategy='ddp', # multi-process single-device training on one or multiple nodes
+                      callbacks=[PyTorchLightningPruningCallback(trial, monitor="val_loss")])
 
-    torch.set_num_threads(click_params.num_workers)
+    # torch.set_num_threads(click_params.num_workers)
     pl.seed_everything(click_params.seed, workers=True)    
     model = Regression(**params) # double asterisk (dictionary unpacking)
     trainer.logger.log_hyperparams(params)
-    trainer.fit(model)
+
+    # At the end of constructor. set feauture/target of model
+    # create datasets used by dataloaders
+        # 'subset'_X: dataset containing features of subset (train/test/validation) dataframe
+        # 'subset'_Y: dataset containing targets of subset (train/test/validation) dataframe
+    train_X, train_Y = feature_target_split(train_data, params['l_window'], params['f_horizon'])  
+    test_X, test_Y = feature_target_split(test_data, params['l_window'], params['f_horizon'])
+    validation_X, validation_Y = feature_target_split(val_data, params['l_window'], params['f_horizon'])      
+
+    train_loader = model.train_dataloader(train_X,train_Y)
+    test_loader = model.test_dataloader(test_X,test_Y)
+    val_loader = model.val_dataloader(validation_X,validation_Y)
+
+    trainer.fit(model, train_loader, val_loader)
     return trainer.callback_metrics["val_loss"].item()
 
 #  Example taken from Optuna github page:
@@ -101,7 +124,7 @@ def objective(trial):
 # Theory:
 # https://coderzcolumn.com/tutorials/machine-learning/simple-guide-to-optuna-for-hyperparameters-optimization-tuning
 
-def store_params(study):
+def store_params(study, opt_tmpdir):
     best_params = {}; best_params.update(study.best_params)
     best_params['layer_sizes'] = ','.join(str(value) 
                                     for key,value in best_params.items() 
@@ -181,13 +204,13 @@ def optuna_optimize():
     print_optuna_report(study)
     return study
 
-def optuna_visualize(study):
-    if(optuna.visualization.is_available()):
-        optuna.visualization.plot_param_importances(study).show()
-        optuna.visualization.plot_optimization_history(study).show()
-        optuna.visualization.plot_intermediate_values(study).show()
-        optuna.visualization.plot_slice(study, study.best_params).show()
-        optuna.visualization.plot_contour(study).show()
+def optuna_visualize(study, opt_tmpdir):
+    # if(optuna.visualization.is_available()):
+    #     optuna.visualization.plot_param_importances(study).show()
+    #     optuna.visualization.plot_optimization_history(study).show()
+    #     optuna.visualization.plot_intermediate_values(study).show()
+    #     optuna.visualization.plot_slice(study, study.best_params).show()
+    #     optuna.visualization.plot_contour(study).show()
 
     plt.close() # close any mpl figures (important, doesn't work otherwise)
     optuna.visualization.matplotlib.plot_param_importances(study)
@@ -222,8 +245,8 @@ def optuna_visualize(study):
 @click.option("--l_rate", type=str, default="1e-5, 1e-4", help='range of learning rate used by the model')
 @click.option("--activation", type=str, default="ReLU,SiLU", help='activations function experimented by the model')
 @click.option("--optimizer_name", type=str, default="Adam,RMSprop", help='optimizers experimented by the model') # SGD
-@click.option("--batch_size", type=str, default="64,128,256,512", help='possible batch sizes used by the model') #16,32,
-@click.option("--num_workers", type=str, default="3", help='accelerator (cpu/gpu) processesors and threads used') 
+@click.option("--batch_size", type=str, default="256,512,1024", help='possible batch sizes used by the model') #16,32,
+@click.option("--num_workers", type=str, default="4", help='accelerator (cpu/gpu) processesors and threads used') 
 
 def forecasting_model(**kwargs):
     """
@@ -241,41 +264,40 @@ def forecasting_model(**kwargs):
         mlflow.pytorch.autolog()
         
         # store mlflow metrics/artifacts on temp file
-        global opt_tmpdir
-        opt_tmpdir = tempfile.mkdtemp()
+        with tempfile.TemporaryDirectory() as opt_tmpdir:
 
-        global click_params
-        click_params = ClickParams(kwargs)
+            global click_params
+            click_params = ClickParams(kwargs)
 
-        print("=================== Click Params ===================")
-        print(vars(click_params))
-        
-        #  read csv files
-        df = read_csvs(click_params)
+            print("=================== Click Params ===================")
+            print(vars(click_params))
+            
+            #  read csv files
+            df = read_csvs(click_params)
 
-        # split data in train/test/validation
-        global train_data, test_data, val_data
-        train_data, test_data, val_data = train_test_valid_split(df)
+            # split data in train/test/validation
+            global train_data, test_data, val_data
+            train_data, test_data, val_data = train_test_valid_split(df)
 
-        # train_data.to_csv(f"{opt_tmpdir}/train_data.csv")
-        # test_data.to_csv(f"{opt_tmpdir}/test_data.csv")
-        # val_data.to_csv(f"{opt_tmpdir}/val_data.csv")
+            # train_data.to_csv(f"{opt_tmpdir}/train_data.csv")
+            # test_data.to_csv(f"{opt_tmpdir}/test_data.csv")
+            # val_data.to_csv(f"{opt_tmpdir}/val_data.csv")
 
-        # use Optuna to make a study for best hyperparamter values for maxiumum reduction of loss function
-        study = optuna_optimize()
+            # use Optuna to make a study for best hyperparamter values for maxiumum reduction of loss function
+            study = optuna_optimize()
 
-        store_params(study)        
-        
-        # visualize results of study
-        optuna_visualize(study)
+            store_params(study, opt_tmpdir)        
+            
+            # visualize results of study
+            optuna_visualize(study, opt_tmpdir)
 
-        print("\nUploading training csvs and metrics to MLflow server...")
-        logging.info("\nUploading training csvs and metrics to MLflow server...")
-        mlflow.log_params(kwargs)
-        mlflow.log_artifacts(opt_tmpdir, "optuna_results")
-        mlflow.set_tag("run_id", optuna_start.info.run_id)
-        mlflow.set_tag('best_trial_uri', f'{optuna_start.info.artifact_uri}/optuna_results/optuna_best_trial.pkl')
-        mlflow.set_tag("stage", "optuna")
+            print("\nUploading training csvs and metrics to MLflow server...")
+            logging.info("\nUploading training csvs and metrics to MLflow server...")
+            mlflow.log_params(kwargs)
+            mlflow.log_artifacts(opt_tmpdir, "optuna_results")
+            mlflow.set_tag("run_id", optuna_start.info.run_id)
+            mlflow.set_tag('best_trial_uri', f'{optuna_start.info.artifact_uri}/optuna_results/optuna_best_trial.pkl')
+            mlflow.set_tag("stage", "optuna")
         
 if __name__ == '__main__':
     print("\n=========== Optuna Hyperparameter Tuning =============")

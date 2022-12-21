@@ -28,5 +28,5 @@ statsmodels==0.13.2
 # pickle==4.0
 torchensemble==0.1.9
 python-dotenv==0.21.0
-tornado-6.2
+tornado==6.2 # for webagg on optuna viz (not necessary for non-GUI env)
 boto3==1.26.29 #remote storage of minio

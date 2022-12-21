@@ -643,28 +643,28 @@ def etl(**kwargs):
             result, raw_result = read_csvs() # read csv files and remove outliers
 
             # create temporary directory to store datasets after inputation
-            preprocessed_tmpdir = tempfile.mkdtemp()
+            with tempfile.TemporaryDirectory() as preprocessed_tmpdir:
 
-            for root, dirs, files in os.walk(tmp_folder):
-                for name in files:
-                    # if any(string in countries for string in ('csv_all', csv.stem)):
-                    print(f'Inputing data of csv: "{name}"')
-                    logging.info(f'\nInputing data of csv: "{name}"')
-                    
-                    country = None
-                    if(kwargs['local_tz']):
-                        country, country_code = find_country(name)
-                    else:
-                        country = pathlib.Path(name).stem #find country of csv (its name given the circumstances)
-                    code = compile(f"holidays.{country}()", "<string>", "eval") #find country's holidays
-                    holidays_ = eval(code)
-                    res, null_dates = impute(result[f"{name}"], holidays_, 5000, 0.2, debug=False) # impute datasets and
+                for root, dirs, files in os.walk(tmp_folder):
+                    for name in files:
+                        # if any(string in countries for string in ('csv_all', csv.stem)):
+                        print(f'Inputing data of csv: "{name}"')
+                        logging.info(f'\nInputing data of csv: "{name}"')
+                        
+                        country = None
+                        if(kwargs['local_tz']):
+                            country, country_code = find_country(name)
+                        else:
+                            country = pathlib.Path(name).stem #find country of csv (its name given the circumstances)
+                        code = compile(f"holidays.{country}()", "<string>", "eval") #find country's holidays
+                        holidays_ = eval(code)
+                        res, null_dates = impute(result[f"{name}"], holidays_, 5000, 0.2, debug=False) # impute datasets and
 
-                    print(f'Stored to "{ preprocessed_tmpdir }/{name}"')
-                    logging.info(f'Stored to "{preprocessed_tmpdir}/{name}"')
-                    res.to_csv(f"{preprocessed_tmpdir}/{name}") #store them on seperate folder
+                        print(f'Stored to "{ preprocessed_tmpdir }/{name}"')
+                        logging.info(f'Stored to "{preprocessed_tmpdir}/{name}"')
+                        res.to_csv(f"{preprocessed_tmpdir}/{name}") #store them on seperate folder
 
-                # mlflow tags
+                    # mlflow tags
                 print("\nUploading training csvs and metrics to MLflow server...")
                 logging.info("\nUploading training csvs and metrics to MLflow server...")
                 mlflow.log_params(kwargs)

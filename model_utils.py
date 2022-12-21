@@ -10,6 +10,7 @@ import warnings
 
 import sys
 import copy
+import os
 
 from sklearn import preprocessing
 from sklearn.metrics import mean_squared_error
@@ -29,6 +30,11 @@ import pytorch_lightning as pl
 import mlflow
 from mlflow import MlflowClient
 from mlflow.entities import ViewType
+# get environment variables
+from dotenv import load_dotenv
+load_dotenv()
+# explicitly set MLFLOW_TRACKING_URI as it cannot be set through load_dotenv
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI")
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Globals ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 click_params = None
@@ -106,6 +112,53 @@ class ClickParams:
         except ValueError:
             return False
 
+def download_online_file(url, dst_filename=None, dst_dir=None):
+
+    if dst_dir is None:
+        dst_dir = tempfile.mkdtemp()
+    else:
+        os.makedirs(dst_dir, exist_ok=True)
+    req = requests.get(url)
+    if req.status_code != 200:
+        raise Exception(f"\nResponse is not 200\nProblem downloading: {url}")
+        sys.exit()
+    url_content = req.content
+    if dst_filename is None:
+        dst_filename = url.split('/')[-1]
+    filepath = os.path.join(dst_dir, dst_filename)
+    file = open(filepath, 'wb')
+    file.write(url_content)
+    file.close()
+
+    return filepath
+
+def download_mlflow_file(url, dst_dir=None):
+    S3_ENDPOINT_URL = os.environ.get('MLFLOW_S3_ENDPOINT_URL')
+
+    if dst_dir is None:
+        dst_dir = tempfile.mkdtemp()
+    else:
+        os.makedirs(dst_dir, exist_ok=True)
+    if url.startswith('s3://mlflow-bucket/'):
+        url = url.replace("s3:/", S3_ENDPOINT_URL)
+        local_path = download_online_file(
+            url, dst_dir=dst_dir)
+    elif url.startswith('runs:/'):
+        # client = mlflow.tracking.MlflowClient()
+        run_id = url.split('/')[1]
+        mlflow_path = '/'.join(url.split('/')[3:])
+        # local_path = client.download_artifacts(run_id, mlflow_path, dst_dir)
+        local_path = mlflow.artifacts.download_artifacts(run_id, mlflow_path, dst_dir)
+    elif url.startswith('http://'):
+        local_path = download_online_file(url, dst_dir=dst_dir)
+    elif url.startswith('file:///'):
+        mlflow_path = '/'.join(url.split('/')[3:])
+        local_path = mlflow.artifacts.download_artifacts(mlflow_path, dst_path=dst_dir)
+    else:
+        return url
+
+    return local_path
+
 def search_proper_run():
     # find best pretrained model by searching runs with
     # search only runs in 'model' stage and without transfer learning
@@ -154,24 +207,23 @@ class Regression(pl.LightningModule):
         self.transfer_mode = Transfer(params['transfer_mode']) if('transfer_mode'in params) \
                              else Transfer.NO_TRANSFER 
 
-        # if('transfer_mode' in params): 
-        #     self.transfer_mode = Transfer(params['transfer_mode'])
-
         # enable Lightning to store all the provided arguments 
         # under the self.hparams attribute. 
         # These hyperparameters will also be stored within the model checkpoint
         self.save_hyperparameters()
 
-        input_dim = self.hparams.l_window #input dim set to lookback_window
-        output_dim = self.hparams.f_horizon #output dim set to f_horizon
-        
+        #input dim set to lookback_window while output dim set to f_horizon
+        input_dim, output_dim = self.hparams.l_window, self.hparams.f_horizon
+
         # create datasets used by dataloaders
         # 'subset'_X: dataset containing features of subset (train/test/validation) dataframe
         # 'subset'_Y: dataset containing targets of subset (train/test/validation) dataframe
-        global train_data, test_data, val_data
-        self.train_X, self.train_Y = feature_target_split(train_data,input_dim,output_dim)  
-        self.test_X, self.test_Y = feature_target_split(test_data,input_dim,output_dim)
-        self.validation_X, self.validation_Y = feature_target_split(val_data,input_dim,output_dim)          
+        # global train_data, test_data, val_data
+
+        # At the end of constructor. set feauture/target of model
+        # self.train_X, self.train_Y = feature_target_split(train_data,input_dim,output_dim)  
+        # self.test_X, self.test_Y = feature_target_split(test_data,input_dim,output_dim)
+        # self.validation_X, self.validation_Y = feature_target_split(val_data,input_dim,output_dim)      
 
         """
         feature_extractor: all layers before classifier
@@ -189,11 +241,13 @@ class Regression(pl.LightningModule):
         else:
             # get best pretrained model and load its feature extractor
             best_run = search_proper_run()
-            # model = mlflow.pytorch.load_model(f"runs:/{best_run.info.run_id}/model")
-            checkpoint_path = mlflow.artifacts.download_artifacts(f"runs:/{best_run.info.run_id}/train_results/checkpoint.ckpt")
-            print(f'checkpoint_path: {checkpoint_path}') 
-            model = Regression.load_from_checkpoint(checkpoint_path)
-            print('OK')
+            model = mlflow.pytorch.load_model(f"runs:/{best_run.info.run_id}/model")
+            mlflow.set_tag("tranfer_model_runID", best_run.info.run_id)        
+
+            # checkpoint_path = mlflow.artifacts.download_artifacts(f"runs:/{best_run.info.run_id}/train_results/checkpoint.ckpt")
+            # print(f'checkpoint_path: {checkpoint_path}') 
+            # model = Regression.load_from_checkpoint(checkpoint_path)
+
             # get dimension of last hidden layer of model (one before output)
             last_dim = model.hparams.layer_sizes[-1]
             self.feature_extractor = model.feature_extractor # "old" feature extractor
@@ -207,7 +261,7 @@ class Regression(pl.LightningModule):
                 print('Using \"FREEZING\" technique...') # freeze feature layers
                 # self.feature_extractor.eval() # disable dropout/BatchNorm layers using eval()
                 self.feature_extractor.requires_grad_(False) # freeze params
-                # self.feature_extractor.freeze() 
+                # self.feature_extractor.freeze()     
 
     def make_hidden_layers(self):
         """
@@ -227,6 +281,7 @@ class Regression(pl.LightningModule):
         cur_layer = self.hparams.l_window
 
         for next_layer in self.hparams.layer_sizes: 
+            print(f'({cur_layer},{next_layer},{self.hparams.layer_sizes})')
             layers.append(nn.Linear(cur_layer, next_layer))
             layers.append(getattr(nn, self.hparams.activation)()) # nn.activation_function (as suggested by Optuna)
             cur_layer = next_layer #connect cur_layer with previous layer (at first iter, input layer)
@@ -243,30 +298,37 @@ class Regression(pl.LightningModule):
 
 ### The Data Loaders ###     
     # Define functions for data loading: train / validate / test
-    def train_dataloader(self):
-        feature = torch.tensor(self.train_X.values).float() #feature tensor train_X
-        target = torch.tensor(self.train_Y.values).float() #target tensor train_Y
+
+# If you load your samples in the Dataset on CPU and would like to push it during training to the GPU, 
+# you can speed up the host to device transfer by enabling "pin_memory".
+# This lets your DataLoader allocate the samples in page-locked memory, which speeds-up the transfer.    
+    def train_dataloader(self,train_X, train_Y):
+        feature = torch.tensor(train_X.values).float() #feature tensor train_X
+        target = torch.tensor(train_Y.values).float() #target tensor train_Y
         train_dataset = TensorDataset(feature, target)  # dataset bassed on feature/target
         train_loader = DataLoader(dataset = train_dataset, 
                                   shuffle = True, 
+                                  pin_memory=True if torch.cuda.is_available() else False, #for GPU
                                   num_workers = self.hparams.num_workers,
                                   batch_size = self.hparams.batch_size)
         return train_loader
             
-    def test_dataloader(self):
-        feature = torch.tensor(self.test_X.values).float()
-        target = torch.tensor(self.test_Y.values).float()
+    def test_dataloader(self,test_X,test_Y):
+        feature = torch.tensor(test_X.values).float()
+        target = torch.tensor(test_Y.values).float()
         test_dataset = TensorDataset(feature, target)
         test_loader = DataLoader(dataset = test_dataset, 
+                                 pin_memory=True if torch.cuda.is_available() else False, #for GPU
                                  num_workers = self.hparams.num_workers,
                                  batch_size = self.hparams.batch_size)
         return test_loader
 
-    def val_dataloader(self):
-        feature = torch.tensor(self.validation_X.values).float()
-        target = torch.tensor(self.validation_Y.values).float()
+    def val_dataloader(self,validation_X,validation_Y):
+        feature = torch.tensor(validation_X.values).float()
+        target = torch.tensor(validation_Y.values).float()
         val_dataset = TensorDataset(feature, target)
         validation_loader = DataLoader(dataset = val_dataset,
+                                       pin_memory=True if torch.cuda.is_available() else False, #for GPU
                                        num_workers = self.hparams.num_workers,
                                        batch_size = self.hparams.batch_size)
         return validation_loader

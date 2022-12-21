@@ -6,6 +6,7 @@
 # 
 # Let's import some basic libraries
 import numpy as np
+import pandas as pd
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
@@ -15,6 +16,7 @@ from pytorch_lightning.callbacks import EarlyStopping
 import logging
 import click
 import mlflow
+from mlflow.models.signature import infer_signature
 import tempfile
 import shutil
 import os
@@ -23,6 +25,12 @@ import os
 from model_utils import ClickParams, Regression, Transfer
 from model_utils import read_csvs, train_test_valid_split, \
                         feature_target_split, cross_plot_pred_data, calculate_metrics
+
+# get environment variables
+from dotenv import load_dotenv
+load_dotenv()
+# explicitly set MLFLOW_TRACKING_URI as it cannot be set through load_dotenv
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI")
 
 def train_test_best_model(train_tmpdir):
     """
@@ -36,47 +44,67 @@ def train_test_best_model(train_tmpdir):
     params = vars(click_params)
     
     # layer_sizes must be iterable for creating model layers
-    params['layer_sizes'] = [params['layer_sizes']] 
+    if(not isinstance(params['layer_sizes'],list)):
+        params['layer_sizes'] = [params['layer_sizes']] 
 
-    torch.set_num_threads(click_params.num_workers)
+    # torch.set_num_threads(click_params.num_workers)
     pl.seed_everything(click_params.seed, workers=True)  
-      
+
     model = Regression(**params) # double asterisk (dictionary unpacking)
 
     max_epochs = None
     max_epochs = 5 if(model.transfer_mode == Transfer.BOUNDED_EPOCHS) \
                    else params['max_epochs']
 
-    trainer = Trainer(max_epochs=max_epochs, auto_scale_batch_size=None, 
+    trainer = Trainer(max_epochs=max_epochs, deterministic=True,
                     #   profiler="simple", #add simple profiler
-                    callbacks=[EarlyStopping(monitor="val_loss", mode="min", verbose=True)],
-                    deterministic=True) 
+                    # precision=16, # employ half-precision whenever available while maintaining single-precision everywhere else
+                    # accelerator='auto', 
+                    # devices = 1 if torch.cuda.is_available() else 0,
+                    # auto_select_gpus=True if torch.cuda.is_available() else False,
+                    # strategy='ddp', # multi-process single-device training on one or multiple nodes
+                    callbacks=[EarlyStopping(monitor="val_loss", mode="min", verbose=True)]) 
 
-    trainer.fit(model)
+    # At the end of constructor. set feauture/target of model
+    # create datasets used by dataloaders
+        # 'subset'_X: dataset containing features of subset (train/test/validation) dataframe
+        # 'subset'_Y: dataset containing targets of subset (train/test/validation) dataframe
+    train_X, train_Y = feature_target_split(train_data,click_params.l_window,click_params.f_horizon)  
+    test_X, test_Y = feature_target_split(test_data,click_params.l_window,click_params.f_horizon)
+    validation_X, validation_Y = feature_target_split(val_data, click_params.l_window,click_params.f_horizon)      
+
+    train_loader = model.train_dataloader(train_X,train_Y)
+    test_loader = model.test_dataloader(test_X,test_Y)
+    val_loader = model.val_dataloader(validation_X,validation_Y)
+
+    trainer.fit(model, train_loader, val_loader)
 
     pl.utilities.model_summary.ModelSummary(model, max_depth=-1)
 
     # Pytorch lighting uses checkpoints to store state of model
     # the file containing checkpoint are create automatically in checkpoint_path
     # we add this file as artifcact to mllflow to load them in our model
-    checkpoint_path = (
-            f'./lightning_logs/version_{trainer.logger.version}/checkpoints/'
-            f'epoch={trainer.current_epoch-1}-step={trainer.global_step}.ckpt'
-    )
-    shutil.copyfile(os.path.abspath(checkpoint_path), f"{train_tmpdir}/checkpoint.ckpt")
-
-    # mlflow.pytorch.log_model(model, "model")
-
+    # checkpoint_path = (
+    #         f'./lightning_logs/version_{trainer.logger.version}/checkpoints/'
+    #         f'epoch={trainer.current_epoch-1}-step={trainer.global_step}.ckpt'
+    # )
+    # shutil.copyfile(os.path.abspath(checkpoint_path), f"{train_tmpdir}/checkpoint.ckpt")
+    
     # Either best or path to the checkpoint you wish to test. 
     # If None and the model instance was passed, use the current weights. 
     # Otherwise, the best model from the previous trainer.fit call will be loaded.
-    trainer.test(ckpt_path='best')
+    trainer.test(ckpt_path='best', dataloaders=test_loader)
 
-    trainer.validate(ckpt_path='best')
+    trainer.validate(ckpt_path='best', dataloaders=val_loader)
 
-    preds = trainer.predict(ckpt_path='best')
+    preds = trainer.predict(ckpt_path='best', dataloaders=test_loader)
+
+    #store trained model to mlflow with input singature
+    signature = infer_signature(train_X.head(1), pd.DataFrame(preds))
+    mlflow.pytorch.log_model(model, "model", signature=signature)
+
     actuals = []
-    for x,y in model.test_dataloader(): 
+    for x,y in test_loader: 
         actuals.append(y)
 
     # torch.vstack: convert list of tensors to (rank 2) tensor
@@ -136,9 +164,9 @@ def sklearn_regress():
 @click.option("--l_rate", type=str, default="1e-4", help='range of learning rate used by the model')
 @click.option("--activation", type=str, default="ReLU", help='activations function experimented by the model')
 @click.option("--optimizer_name", type=str, default="Adam", help='optimizers experimented by the model') # SGD
-@click.option("--batch_size", type=str, default="200", help='possible batch sizes used by the model') #16,32,
+@click.option("--batch_size", type=str, default="1024", help='possible batch sizes used by the model') #16,32,
 @click.option("--transfer_mode", type=str, default="0", help='indicator to use transfer learning techniques')
-@click.option("--num_workers", type=str, default="3", help='accelerator (cpu/gpu) processesors and threads used') 
+@click.option("--num_workers", type=str, default="4", help='accelerator (cpu/gpu) processesors and threads used') 
 
 def forecasting_model(**kwargs):
     """
@@ -157,45 +185,46 @@ def forecasting_model(**kwargs):
         mlflow.pytorch.autolog()
 
         # store mlflow metrics/artifacts on temp file
-        train_tmpdir = tempfile.mkdtemp()
+        with tempfile.TemporaryDirectory() as train_tmpdir: 
 
-        global click_params
-        click_params = ClickParams(kwargs)
-        
-        # #  read csv files
-        df = read_csvs(click_params)
-        df_backup = df.copy()
+            global click_params
+            click_params = ClickParams(kwargs)
+            
+            # #  read csv files
+            df = read_csvs(click_params)
+            df_backup = df.copy()
 
-        # split data in train/test/validation
-        global train_data, test_data, val_data
-        train_data, test_data, val_data = train_test_valid_split(df)
+            # split data in train/test/validation
+            global train_data, test_data, val_data
+            train_data, test_data, val_data = train_test_valid_split(df)
 
-        # train_data.to_csv(f"{train_tmpdir}/train_data.csv")
-        # test_data.to_csv(f"{train_tmpdir}/test_data.csv")
-        # val_data.to_csv(f"{train_tmpdir}/val_data.csv")
+            # train_data.to_csv(f"{train_tmpdir}/train_data.csv")
+            # test_data.to_csv(f"{train_tmpdir}/test_data.csv")
+            # val_data.to_csv(f"{train_tmpdir}/val_data.csv")
 
-        # train model with hparams set to best_params of optuna 
-        plot_pred, plot_actual = train_test_best_model(train_tmpdir)
-        # plot_pred, plot_actual = sklearn_regress()
+            # train model with hparams set to best_params of optuna 
+            plot_pred, plot_actual = train_test_best_model(train_tmpdir)
+            # plot_pred, plot_actual = sklearn_regress()
 
-        # calculate metrics
-        metrics = calculate_metrics(plot_actual,plot_pred)
+            # calculate metrics
+            metrics = calculate_metrics(plot_actual,plot_pred)
 
-        # plot prediction/actual data on common axis system 
-        cross_plot_pred_data(df_backup, plot_pred, plot_actual, train_tmpdir)
+            # plot prediction/actual data on common axis system 
+            cross_plot_pred_data(df_backup, plot_pred, plot_actual, train_tmpdir)
 
-        print("\nUploading training csvs and metrics to MLflow server...")
-        logging.info("\nUploading training csvs and metrics to MLflow server...")
-        mlflow.log_params(kwargs)
-        mlflow.log_artifacts(train_tmpdir, "train_results")
-        mlflow.log_metrics(metrics)
-        mlflow.set_tag("run_id", train_start.info.run_id)        
-        mlflow.set_tag('checkpoint_uri', f'{train_start.info.artifact_uri}/train_results//checkpoint.ckpt')
-        mlflow.set_tag("stage", "model")
-        mlflow.set_tag("transfer", Transfer(click_params.transfer_mode).name)
+            print("\nUploading training csvs and metrics to MLflow server...")
+            logging.info("\nUploading training csvs and metrics to MLflow server...")
+            mlflow.log_params(kwargs)
+            mlflow.log_artifacts(train_tmpdir, "train_results")
+            mlflow.log_metrics(metrics)
+            mlflow.set_tag("run_id", train_start.info.run_id)        
+            mlflow.set_tag('checkpoint_uri', f'{train_start.info.artifact_uri}/train_results/checkpoint.ckpt')
+            mlflow.set_tag("stage", "model")
+            mlflow.set_tag("transfer", Transfer(click_params.transfer_mode).name)
 
 
 if __name__ == '__main__':
     print("\n=========== Forecasing Model =============")
     logging.info("\n=========== Forecasing Model =============")
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)    
     forecasting_model()

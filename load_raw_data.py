@@ -7,53 +7,14 @@ import click
 import logging
 import shutil
 import pycountry
+from model_utils import download_online_file, download_mlflow_file
 
-def download_online_file(url, dst_filename=None, dst_dir=None):
+# get environment variables
+from dotenv import load_dotenv
+load_dotenv()
 
-    if dst_dir is None:
-        dst_dir = tempfile.mkdtemp()
-    else:
-        os.makedirs(dst_dir, exist_ok=True)
-    req = requests.get(url)
-    if req.status_code != 200:
-        raise Exception(f"\nResponse is not 200\nProblem downloading: {url}")
-        sys.exit()
-    url_content = req.content
-    if dst_filename is None:
-        dst_filename = url.split('/')[-1]
-    filepath = os.path.join(dst_dir, dst_filename)
-    file = open(filepath, 'wb')
-    file.write(url_content)
-    file.close()
-
-    return filepath
-
-def download_mlflow_file(url, dst_dir=None):
-    S3_ENDPOINT_URL = os.environ.get('MLFLOW_S3_ENDPOINT_URL')
-
-    if dst_dir is None:
-        dst_dir = tempfile.mkdtemp()
-    else:
-        os.makedirs(dst_dir, exist_ok=True)
-    if url.startswith('s3://mlflow-bucket/'):
-        url = url.replace("s3:/", S3_ENDPOINT_URL)
-        local_path = download_online_file(
-            url, dst_dir=dst_dir)
-    elif url.startswith('runs:/'):
-        # client = mlflow.tracking.MlflowClient()
-        run_id = url.split('/')[1]
-        mlflow_path = '/'.join(url.split('/')[3:])
-        # local_path = client.download_artifacts(run_id, mlflow_path, dst_dir)
-        local_path = mlflow.artifacts.download_artifacts(run_id, mlflow_path, dst_dir)
-    elif url.startswith('http://'):
-        local_path = download_online_file(url, dst_dir=dst_dir)
-    elif url.startswith('file:///'):
-        mlflow_path = '/'.join(url.split('/')[3:])
-        local_path = mlflow.artifacts.download_artifacts(mlflow_path, dst_path=dst_dir)
-    else:
-        return url
-
-    return local_path
+# explicitly set MLFLOW_TRACKING_URI as it cannot be set through load_dotenv
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI")
 
 def find_country(filename):
     # Get lists of country names and codes based on pycountry lib
@@ -83,6 +44,8 @@ def load_raw_data(dir_in, countries):
     series_uri: folder or file used as input for pipeline
     """
     with mlflow.start_run(run_name="load_data",nested=True) as load_start:
+        # Auto log all MLflow entities
+        mlflow.pytorch.autolog()
 
         if(not os.path.exists(dir_in)):
             input_path = download_mlflow_file(dir_in, dst_dir=None)
@@ -112,4 +75,5 @@ def load_raw_data(dir_in, countries):
 if __name__ == '__main__':
     print("\n=========== Load Data =============")
     logging.info("\n=========== Load Data =============")
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     load_raw_data()

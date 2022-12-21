@@ -4,19 +4,42 @@ import itertools
 import click
 from enum import IntEnum
 from model_utils import ClickParams
+# get environment variables
+from dotenv import load_dotenv
+load_dotenv()
+# explicitly set MLFLOW_TRACKING_URI as it cannot be set through load_dotenv
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI")
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Globals ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 click_params = None
+all_countries = None
+clustered_countries = {
+    'cluster_1': 'Greece,Spain,Croatia,Italy',
+    'cluster_2': 'Portugal,Ireland,Serbia,France,Belgium,Netherlands,Hungary',  
+    'cluster_3': 'Ukraine,Romania,Bulgaria,Slovenia,Slovakia,Austria,Germany,Poland,Switcherland',
+    'cluster_4': 'Norway,Sweden,Denmark,Czechia,Lithuania,Latvia,Estonia,Finland'
+}
+
+# all_countries = ['Austria','Belgium','Bulgaria','Croatia','Czechia','Denmark','Estonia',
+#                 'Finland','France','Germany','Greece','Hungary','Ireland','Italy',
+#                 'Latvia','Lithuania','Netherland','Norway','Poland','Portugal','Romania',
+#                 'Serbia','Slovakia','Slovenia','Spain','Sweden','Switzerland','Ukraine']
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Functions ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-def all_for_one(countries,combinations):
+def source_target_split(countries):
+    """
+    This function gets a list of country names and creates two arrays 
+    one for src and tgt domain, where at i-th index of those
+    is src/tgt country combination
+    """
+    # get list of lists for all possible combinations with N-1 countries
+    combinations = list(itertools.combinations(countries, len(countries)-1)) 
+
     # prepare combinations to be used as command argument
     source_domain = []
     for comb in combinations:
         source_domain.append(','.join(str(country) for country in comb))
-
-    # print(source_domain)
 
     # get list of missing value of combination (target domain of combination)
     target_domain = []
@@ -26,49 +49,80 @@ def all_for_one(countries,combinations):
     
     return source_domain, target_domain
 
-def case_1(params,domain):
+def case_1(params):
     """
     Case 1: Source and target domain is the same one country
     """
-    print("=============== Case 1 ===============")        
-    print(f"Source/Target Domain: {domain}")
-    for country in domain:
-        print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")               
+    print("=============== Case 1 ===============")    
+
+    stages = ','.join(params.stages)
+    for idx, country in enumerate(all_countries,1):
+        print(f"~~~~~~~~~~~~~~~~ Experiment no. {idx} ~~~~~~~~~~~~~~~~~~~~")               
         print(f"Source/Target Domain: {country}")
-        print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")       
-        command = (
-            f'mlflow run . --env-manager=local -P stages={params.stages} '
-            f'-P src_countries={country} -P transfer_mode=0 -P test_case=1 ' ## add/remove max_epochs
-            f'-P max_epochs=2 -P n_trials=2 '
-            f'--experiment-name={params.experiment_name}'
-        )     
-        print(command)
-        os.system(command)
+        print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")       
+        # command = (
+        #     f'mlflow run . --env-manager=local -P stages={stages} '
+        #     f'-P src_countries={country} -P transfer_mode=0 -P test_case=1 ' ## add/remove max_epochs
+        #     f'-P max_epochs=2 -P n_trials=2 -P n_estimators=3 -P batch_size=1024 '
+        #     f'--experiment-name={params.experiment_name}'
+        # )     
+        # print(command)
+        # os.system(command)
     
-def case_2(params,source_domain,target_domain):
+def case_2(params):
     """
     Case 2: 
         Source domain: N-1 countries
         Target domain: 1 (remaining) country
     """
-    print("=============== Case 2 ===============")        
-    counter = 0
-    for src, tgt in zip(source_domain,target_domain):
-        print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")
+    print("=============== Case 2 ===============") 
+    # create source/target list of countries
+    source_domain,target_domain = source_target_split(all_countries)
+
+    stages = ','.join(params.stages) if isinstance(params.stages,list) else params.stages
+    for idx, (src, tgt) in enumerate(zip(source_domain,target_domain), 1):
+        print(f"~~~~~~~~~~~~~~~~ Experiment no. {idx} ~~~~~~~~~~~~~~~~~~~~")               
         print(f"Source Domain: {src}")
         print(f'Target Domain: {tgt}')
-        print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")   
+        print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")   
         command = (
-            f'mlflow run . --env-manager=local -P stages={params.stages} '
+            f'mlflow run . --env-manager=local -P stages={stages} '
             f'-P src_countries={src} -P tgt_countries={tgt} -P test_case=2 '
             f'-P transfer_mode={params.transfer_mode} ' ## add/remove max_epochs
-            f'-P max_epochs=2 -P n_trials=2 '
+            f'-P max_epochs=2 -P n_trials=2 -P n_estimators=3 -P batch_size=1024 '
             f'--experiment-name={params.experiment_name}'
         )     
         print(command)
         os.system(command)
-        counter+= 1
-        if(counter > 0): break;
+        break;
+
+def case_3(params):
+    idx = 1
+
+    for cluster in clustered_countries.values():
+        countries = cluster.split(',')
+
+        # create source/target list of countries
+        source_domain,target_domain = source_target_split(countries)
+
+        stages = ','.join(params.stages) if isinstance(params.stages,list) else params.stages
+
+        for src, tgt in zip(source_domain,target_domain):
+            print(f"~~~~~~~~~~~~~~~~ Experiment no. {idx} ~~~~~~~~~~~~~~~~~~~~")               
+            print(f"Source Domain: {src}")
+            print(f'Target Domain: {tgt}')
+            print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")  
+            # command = (
+            #     f'mlflow run . --env-manager=local -P stages={stages} '
+            #     f'-P src_countries={src} -P tgt_countries={tgt} -P test_case=2 '
+            #     f'-P transfer_mode={params.transfer_mode} ' ## add/remove max_epochs
+            #     f'-P max_epochs=2 -P n_trials=2 -P n_estimators=3 -P batch_size=1024 '
+            #     f'--experiment-name={params.experiment_name}'
+            # )     
+            # print(command)
+            # os.system(command)
+            idx += 1
+            # if(idx > 0): return;
 
 #### Enum used to define test case used in run of test_script  
 class TestCase(IntEnum):
@@ -84,23 +138,16 @@ class TestCase(IntEnum):
 @click.option("--experiment_name", type=str, default="alex_trash", help='indicator to use transfer learning techniques')
 
 def test_script(**kwargs):
-    countries = os.listdir('../preprocessed_data/') #get list of countries
-    countries = [x.rstrip('.csv') for x in countries] # remove '.csv' suffix in each one
 
-    # get list of lists for all possible combinations with N-1 countries
-    combinations = list(itertools.combinations(countries, len(countries)-1)) 
-
-    # create source/target list of countries
-    source_domain,target_domain = all_for_one(countries,combinations)
+    global all_countries
+    all_countries = os.listdir('../preprocessed_data/') #get list of countries
+    all_countries = [x.rstrip('.csv') for x in all_countries] # remove '.csv' suffix in each one
 
     click_params = ClickParams(kwargs)
 
-    if(TestCase(click_params.case) == TestCase.BENCHMARK):
-        case_1(click_params,target_domain)
-    if(TestCase(click_params.case) == TestCase.ALL_FOR_ONE):
-        case_2(click_params,source_domain,target_domain)
-    if(TestCase(click_params.case) == TestCase.CLUSTER_FOR_ONE):
-        pass
+    if(TestCase(click_params.case) == TestCase.BENCHMARK): case_1(click_params)
+    if(TestCase(click_params.case) == TestCase.ALL_FOR_ONE): case_2(click_params)
+    if(TestCase(click_params.case) == TestCase.CLUSTER_FOR_ONE): case_3(click_params)
     
 if __name__ == "__main__":
     test_script()

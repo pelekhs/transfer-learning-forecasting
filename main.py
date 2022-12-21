@@ -19,7 +19,13 @@ from mlflow.utils.logging_utils import eprint
 from mlflow.tracking.fluent import _get_experiment_id
 
 from model_utils import ClickParams, Transfer, TestCase
+from model_utils import download_online_file, download_mlflow_file, search_proper_run
 
+# get environment variables
+from dotenv import load_dotenv
+load_dotenv()
+# explicitly set MLFLOW_TRACKING_URI as it cannot be set through load_dotenv
+# os.environ["MLFLOW_TRACKING_URI"] = ConfigParser().mlflow_tracking_uri
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI")
 S3_ENDPOINT_URL = os.environ.get('MLFLOW_S3_ENDPOINT_URL')
 
@@ -79,7 +85,8 @@ def _already_ran(entry_point_name, parameters, experiment_id=None):
 def _get_or_run(entrypoint, parameters, ignore_previous_run=False, use_cache=True):
 # TODO: this was removed to always run the pipeline from the beginning.
     if not ignore_previous_run:
-        existing_run = _already_ran(entrypoint, parameters)
+        # existing_run = _already_ran(entrypoint, parameters)
+        existing_run = None
         if use_cache and existing_run:
             # print(f'Found existing run (with ID=%s) for entrypoint=%s and parameters=%s')
             logging.warning(f"Found existing run (with ID={existing_run.info.run_id}) for entrypoint={entrypoint} and parameters={parameters}")
@@ -90,72 +97,168 @@ def _get_or_run(entrypoint, parameters, ignore_previous_run=False, use_cache=Tru
                                 env_manager="local")
     return MlflowClient().get_run(submitted_run.run_id)
 
-def pipeline(kwargs):
-    pipeline_name = 'SOURCE'
-    if(kwargs['transfer_mode'] != str(Transfer.NO_TRANSFER.value)):
-        pipeline_name = 'TARGET'
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Load entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-    with mlflow.start_run(run_name=pipeline_name,nested=True) as pipeline_run:
-        mlflow.set_tag("stage", pipeline_name)
-        
-        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Optuna entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        optuna_run = None; optuna_params = None
-        if 'optuna' in kwargs['stages'] or 'all' in kwargs['stages']:
-            print("\n=========== Optuna Stage =============")
-            logging.info("\n=========== Optuna Stage =============")            
-            # if max_epochs int and not list (range), then main's click params (default or manually set)
-            #    are meant for 'model' entrypoint and therefore should be ignored by optuna  
-            # if not, it means that main's click params should be passed to optuna run
-            if(not isinstance(kwargs['max_epochs'], list)):
-                optuna_params = {
-                    'dir_in': kwargs['dir_in'],
-                    'countries': kwargs['countries'],
-                    'seed': kwargs['seed'],
-                    'n_trials': kwargs['n_trials']
-                }
-                optuna_run = _get_or_run("optuna", parameters=optuna_params)   
-            else:
-                exclusion_list = {'stages','local_tz','transfer_mode','n_estimators'}
-                optuna_params = {x: kwargs[x] for x in kwargs if x not in exclusion_list}
-                optuna_run = _get_or_run("optuna", parameters=optuna_params)   
+def load_step(train_kwargs, pipeline_name):
+    load_run = None; load_params = None; load_data_path = None
+    print(f"\n=========== {pipeline_name}: Load Data Stage =============")
+    logging.info(f"\n=========== {pipeline_name}: Load Data Stage =============")    
+    load_params = {
+        'dir_in':  train_kwargs['dir_in'],
+        'countries': train_kwargs['countries']         
+    }
+    load_run = _get_or_run("load", parameters=load_params)
+    load_data_path = mlflow.artifacts.download_artifacts(f'runs:/{load_run.info.run_id}/load_data')
+    print(f'load_data_path : {load_data_path}')
+    
+    return load_run, load_data_path
 
-        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Train entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        train_run = None; train_params = None 
-        if 'model' in kwargs['stages'] or 'all' in kwargs['stages']:
-            print("\n=========== Model Stage =============")
-            logging.info("\n=========== Model Stage =============")
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ETL entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-            if('optuna' in kwargs['stages']):
+def etl_step(train_kwargs, load_run, load_data_path, pipeline_name):
+    etl_run = None; etl_params = None; preprocessed_data_path = None
+    if('etl' in train_kwargs['stages'] or 'all' in train_kwargs['stages']):
+        print(f"\n=========== {pipeline_name}: ETL Stage =============")
+        logging.info(f"\n=========== {pipeline_name}: ETL Stage =============")
+        etl_params = {
+            'dir_in':  load_data_path if load_run else train_kwargs['dir_in'],
+            'countries': train_kwargs['countries'], 
+            'local_tz': train_kwargs['local_tz']
+        }
+        print(etl_params)
+        etl_run = _get_or_run("etl", parameters=etl_params)
+
+        load_data_uri = load_run.data.tags['load_data_uri'].replace("s3:/", S3_ENDPOINT_URL)
+
+        # fetch output folder containing preprocessed datasets from etl, to be used as input for the following entrypoints
+        preprocessed_data_path = mlflow.artifacts.download_artifacts(f'runs:/{etl_run.info.run_id}/preprocessed_data')
+        print(f'preprocessed_data_path : {preprocessed_data_path}')
+
+        # 'dir_in' in the context of etl is original data folder, while 
+        # in the context of everything  else, is the output of dir_in
+        train_kwargs['dir_in'] = preprocessed_data_path
+
+    return etl_run 
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Optuna entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+def optuna_step(train_kwargs,pipeline_name):
+    optuna_run = None; optuna_params = None
+    if(pipeline_name == 'TARGET'): #optuna is unecessary in target model
+        return optuna_run, optuna_params
+
+    if ('optuna' in train_kwargs['stages'] or 'all' in train_kwargs['stages']):
+        print(f"\n=========== {pipeline_name}: Optuna Stage =============")
+        logging.info(f"\n=========== {pipeline_name}: Optuna Stage =============")            
+        # if max_epochs int and not list (range), then main's click params (default or manually set)
+        #    are meant for 'model' entrypoint and therefore should be ignored by optuna  
+        # if not, it means that main's click params should be passed to optuna run
+        if(not isinstance(train_kwargs['max_epochs'], list)):
+            optuna_params = {
+                'dir_in': train_kwargs['dir_in'],
+                'countries': train_kwargs['countries'],
+                'seed': train_kwargs['seed'],
+                'n_trials': train_kwargs['n_trials']
+            }
+            print(f'optuna_params: {optuna_params}')
+            optuna_run = _get_or_run("optuna", parameters=optuna_params)   
+        else:
+            exclusion_list = {'stages','local_tz','transfer_mode','n_estimators'}
+            optuna_params = {x: train_kwargs[x] for x in train_kwargs if x not in exclusion_list}
+            print(f'optuna_params: {optuna_params}')
+            optuna_run = _get_or_run("optuna", parameters=optuna_params)   
+
+    return optuna_run, optuna_params
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Train entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+def train_step(train_kwargs,pipeline_name,optuna_run):
+    train_run = None; train_params = None 
+    if 'model' in train_kwargs['stages'] or 'all' in train_kwargs['stages']:
+        print(f"\n=========== {pipeline_name}: Model Stage =============")
+        logging.info(f"\n=========== {pipeline_name}: Model Stage =============")
+        if(pipeline_name == 'SOURCE'):
+            if(optuna_run):
                 print("\n########### Optuna used for model ###########")
                 logging.info("\n########### Optuna used for model ###########")
                 best_trial_path = f'runs:/{optuna_run.info.run_id}/optuna_results/optuna_best_trial.pkl'
                 train_params = mlflow.artifacts.download_artifacts(best_trial_path)
                 train_params = pickle.load( open(train_params, 'rb') )
 
-                train_params['transfer_mode'] = kwargs['transfer_mode']
-                train_params['countries'] = kwargs['countries'] ############################
+                train_params['dir_in'] = train_kwargs['dir_in'] 
+                train_params['transfer_mode'] = train_kwargs['transfer_mode']
+                train_params['countries'] = train_kwargs['countries']
 
+                print(f'train_params: {train_params}')
                 train_run = _get_or_run("model", parameters=train_params) 
-            else:  
+            else:   
                 print("\n########### Custom hyperparams used for model ###########")
                 logging.info("\n########### Custom hyperparams used for model ###########")
                 exclusion_list = {'stages','local_tz','n_estimators','n_trials'}
-                train_params = {x: kwargs[x] for x in kwargs if x not in exclusion_list}
-                train_run = _get_or_run("model", parameters=train_params) 
+                train_params = {x: train_kwargs[x] for x in train_kwargs if x not in exclusion_list}
 
-        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Ensemble entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        ensemble_run = None; ensemble_params = None
-        if 'ensemble' in kwargs['stages'] or 'all' in kwargs['stages']:
-            print("\n=========== Ensemble Stage =============")
-            logging.info("\n=========== Ensemble Stage =============")
-            ensemble_params = {'n_estimators': kwargs['n_estimators']}
-            if(not optuna_run): # if no optuna (train only)
-                ensemble_params.update(train_params)
-            else: #if optuna (with or without train - doesn't matter)
-                ensemble_params.update(optuna_params) 
-                del ensemble_params['n_trials'] 
-                ensemble_params['transfer_mode'] = kwargs['transfer_mode']
-            ensemble_run = _get_or_run("ensemble", parameters=ensemble_params) 
+                print(f'train_params: {train_params}')
+                train_run = _get_or_run("model", parameters=train_params) 
+        else:
+            print("\n########### Hyperparams loaded from source model ###########")
+            logging.info("\n########### Hyperparams loaded from source model ###########")
+            
+            best_run = search_proper_run()
+            transfer_params = copy.deepcopy(best_run.data.params)
+
+            print(f'transfer_params: {transfer_params}')
+
+            # autolog() adds additional parameters not necessary for the enrypoint
+            # so we filter those parameters
+            train_params = {x: transfer_params[x] for x in transfer_params if x in (train_kwargs.keys() & transfer_params.keys())}
+            train_params['dir_in'] = train_kwargs['dir_in']
+            train_params['countries'] = train_kwargs['countries']
+            train_params['transfer_mode'] = train_kwargs['transfer_mode']            
+            
+            print(f'train_params: {train_params}')
+            train_run = _get_or_run("model", parameters=train_params) 
+        
+    return train_run, train_params
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Ensemble entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+def ensemble_step(train_kwargs,pipeline_name,train_params):
+    ensemble_run = None; ensemble_params = None
+    if 'ensemble' in train_kwargs['stages'] or 'all' in train_kwargs['stages']:
+        print(f"\n=========== {pipeline_name}: Ensemble Stage =============")
+        logging.info(f"\n=========== {pipeline_name}: Ensemble Stage =============")
+        ensemble_params = {
+                'n_estimators': train_kwargs['n_estimators'],
+                'transfer_mode': train_kwargs['transfer_mode']
+        }
+        ensemble_params.update(train_params)
+        ensemble_params['transfer_mode'] = str(Transfer.NO_TRANSFER.value)
+        print(f'ensemble_params: {ensemble_params}')
+            
+        ensemble_run = _get_or_run("ensemble", parameters=ensemble_params) 
+    
+    return ensemble_run, ensemble_params
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Pipeline ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+def pipeline(train_kwargs):
+
+    pipeline_name = 'SOURCE'
+    if(train_kwargs['transfer_mode'] != str(Transfer.NO_TRANSFER.value)):
+        pipeline_name = 'TARGET'
+
+    with mlflow.start_run(run_name=pipeline_name,nested=True) as pipeline_run:
+        mlflow.set_tag("stage", pipeline_name)
+
+        load_run, load_data_path = load_step(train_kwargs, pipeline_name)
+    
+        etl_run = etl_step(train_kwargs, load_run, load_data_path, pipeline_name)
+
+        optuna_run, optuna_params = optuna_step(train_kwargs, pipeline_name)
+
+        train_run, train_params = train_step(train_kwargs,pipeline_name,optuna_run)
+
+        ensemble_run, ensemble_params = ensemble_step(train_kwargs,pipeline_name,train_params)
 
 # ################################# Click Parameters ########################################
 # Remove whitespace from your arguments
@@ -182,9 +285,9 @@ def pipeline(kwargs):
 @click.option("--l_rate", type=str, default="0.0001", help='range of learning rate used by the model')
 @click.option("--activation", type=str, default="ReLU", help='activations function experimented by the model')
 @click.option("--optimizer_name", type=str, default="Adam", help='optimizers experimented by the model') # SGD
-@click.option("--batch_size", type=str, default="200", help='possible batch sizes used by the model') #16,32,
+@click.option("--batch_size", type=str, default="1024", help='possible batch sizes used by the model') #16,32,
 @click.option("--transfer_mode", type=str, default="0", help='indicator to use transfer learning techniques')
-@click.option("--num_workers", type=str, default="3", help='accelerator (cpu/gpu) processesors and threads used')
+@click.option("--num_workers", type=str, default="4", help='accelerator (cpu/gpu) processesors and threads used')
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Ensemble (exclusive) Params ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 @click.option("--n_estimators", type=str, default="3", help='number of estimators (models) used in ensembling')
@@ -195,41 +298,6 @@ def workflow(**kwargs):
     with mlflow.start_run(run_name="main") as main_run:
         mlflow.set_tag("stage", "main")
         mlflow.set_tag("test_case", TestCase(int(kwargs['test_case'])).name)
-
-        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Load Data entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        load_run = None; load_params = None; load_data_path = None
-        print("\n=========== Load Data Stage =============")
-        logging.info("\n=========== Load Data Stage =============")    
-        load_params = {
-            'dir_in':  kwargs['dir_in'],
-            'countries': kwargs['src_countries'] if kwargs['transfer_mode'] == str(Transfer.NO_TRANSFER.value) \
-                                                    else f"{kwargs['src_countries']},{kwargs['tgt_countries']}",
-        }
-        load_run = _get_or_run("load", parameters=load_params)
-        # fetch output folder containing  loaded datasets from load_data, to be used as input for the etl entrypoint            
-        load_data_path = mlflow.artifacts.download_artifacts(f'runs:/{load_run.info.run_id}/load_data')
-        print(f'load_data_path : {load_data_path}')
-
-        # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ ETL entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-        etl_run = None; etl_params = None; preprocessed_data_path = None
-        if('etl' in kwargs['stages'] or 'all' in kwargs['stages']):
-            print("\n=========== ETL Stage =============")
-            logging.info("\n=========== ETL Stage =============")
-            etl_params = {
-                'dir_in':  load_data_path if load_run else kwargs['dir_in'],
-                'countries': kwargs['src_countries'] if kwargs['transfer_mode'] == str(Transfer.NO_TRANSFER.value) \
-                                                     else f"{kwargs['src_countries']},{kwargs['tgt_countries']}",
-                'local_tz': kwargs['local_tz']
-            }
-            print(etl_params)
-            etl_run = _get_or_run("etl", parameters=etl_params)
-
-            # fetch output folder containing preprocessed datasets from etl, to be used as input for the following entrypoints
-            preprocessed_data_path = mlflow.artifacts.download_artifacts(f'runs:/{etl_run.info.run_id}/preprocessed_data')
-            print(f'preprocessed_data_path : {preprocessed_data_path}')
-            # 'dir_in' in the context of etl is original data folder, while 
-            # in the context of everything  else, is the output of dir_in
-            # kwargs['dir_in'] = preprocessed_data_path
         
         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Source Domain ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         # copy click parameters, update 'countries' element with:
@@ -241,13 +309,13 @@ def workflow(**kwargs):
         train_kwargs = {x: kwargs[x] for x in kwargs if x not in exclusion_list}
         train_kwargs['countries'] = kwargs['src_countries']
         train_kwargs['transfer_mode'] = str(Transfer.NO_TRANSFER.value)
-        train_kwargs['dir_in'] = preprocessed_data_path
 
         pipeline(train_kwargs)
 
         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Target Domain ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         # if there is transfer learning
         if(kwargs['transfer_mode'] != str(Transfer.NO_TRANSFER.value)):
+            train_kwargs['dir_in'] = kwargs['dir_in'] # 'dir_in' changes in etl of previous pipeline() call and needs reset
             train_kwargs['countries'] = kwargs['tgt_countries']
             train_kwargs['transfer_mode'] = kwargs['transfer_mode']
             pipeline(train_kwargs)
@@ -255,4 +323,5 @@ def workflow(**kwargs):
 if __name__ == "__main__":
     print("\n=========== Experimentation Pipeline =============")
     logging.info("\n=========== Experimentation Pipeline =============")    
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
     workflow()
