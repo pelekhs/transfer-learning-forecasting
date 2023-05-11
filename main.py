@@ -29,6 +29,9 @@ load_dotenv()
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI")
 S3_ENDPOINT_URL = os.environ.get('MLFLOW_S3_ENDPOINT_URL')
 
+tl_model_uri = None
+ensemble_model_uri = None
+
 def print_run_info(runs):
     for r in runs:
         print("run_id: {}".format(r.info.run_id))
@@ -142,7 +145,7 @@ def etl_step(train_kwargs, load_run, load_data_path, pipeline_name):
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Optuna entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-def optuna_step(train_kwargs,pipeline_name):
+def optuna_step(train_kwargs, pipeline_name):
     optuna_run = None; optuna_params = None
     if(pipeline_name == 'TARGET'): #optuna is unecessary in target model
         return optuna_run, optuna_params
@@ -172,8 +175,10 @@ def optuna_step(train_kwargs,pipeline_name):
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Train entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-def train_step(train_kwargs,pipeline_name,optuna_run):
-    train_run = None; train_params = None 
+def train_step(train_kwargs, pipeline_name, optuna_run):
+    train_run = None; train_params = None
+    global tl_model_uri
+
     if 'model' in train_kwargs['stages'] or 'all' in train_kwargs['stages']:
         print(f"\n=========== {pipeline_name}: Model Stage =============")
         logging.info(f"\n=========== {pipeline_name}: Model Stage =============")
@@ -188,6 +193,8 @@ def train_step(train_kwargs,pipeline_name,optuna_run):
                 train_params['dir_in'] = train_kwargs['dir_in'] 
                 train_params['transfer_mode'] = train_kwargs['transfer_mode']
                 train_params['countries'] = train_kwargs['countries']
+                train_params['max_epochs'] = train_kwargs['max_epochs']
+                train_params['tl_model_uri'] = train_kwargs['tl_model_uri']
 
                 print(f'train_params: {train_params}')
                 train_run = _get_or_run("model", parameters=train_params) 
@@ -199,6 +206,9 @@ def train_step(train_kwargs,pipeline_name,optuna_run):
 
                 print(f'train_params: {train_params}')
                 train_run = _get_or_run("model", parameters=train_params) 
+            
+            # store as global the transfer learning model uri 
+            tl_model_uri = train_run.data.tags['tl_model_uri']
         else:
             print("\n########### Hyperparams loaded from source model ###########")
             logging.info("\n########### Hyperparams loaded from source model ###########")
@@ -213,17 +223,23 @@ def train_step(train_kwargs,pipeline_name,optuna_run):
             train_params = {x: transfer_params[x] for x in transfer_params if x in (train_kwargs.keys() & transfer_params.keys())}
             train_params['dir_in'] = train_kwargs['dir_in']
             train_params['countries'] = train_kwargs['countries']
-            train_params['transfer_mode'] = train_kwargs['transfer_mode']            
-            
-            print(f'train_params: {train_params}')
+            train_params['transfer_mode'] = train_kwargs['transfer_mode']     
+
+            # retrieve transfer learning model from relative source run     
+            train_params['tl_model_uri'] = tl_model_uri
+
             train_run = _get_or_run("model", parameters=train_params) 
-        
+
     return train_run, train_params
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Ensemble entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-def ensemble_step(train_kwargs,pipeline_name,train_params):
+def ensemble_step(train_kwargs, pipeline_name, train_params):
     ensemble_run = None; ensemble_params = None
+    global ensemble_model_uri
+
+    # if(pipeline_name == 'SOURCE'): return None, None #dont run ensemble on source ####################################
+    
     if 'ensemble' in train_kwargs['stages'] or 'all' in train_kwargs['stages']:
         print(f"\n=========== {pipeline_name}: Ensemble Stage =============")
         logging.info(f"\n=========== {pipeline_name}: Ensemble Stage =============")
@@ -231,13 +247,44 @@ def ensemble_step(train_kwargs,pipeline_name,train_params):
                 'n_estimators': train_kwargs['n_estimators'],
                 'transfer_mode': train_kwargs['transfer_mode']
         }
-        ensemble_params.update(train_params)
+
+        ensemble_params.update(train_params); del ensemble_params['tl_model_uri']
         ensemble_params['transfer_mode'] = str(Transfer.NO_TRANSFER.value)
-        print(f'ensemble_params: {ensemble_params}')
             
         ensemble_run = _get_or_run("ensemble", parameters=ensemble_params) 
-    
+
+        if(pipeline_name == 'SOURCE'):
+            ensemble_model_uri = ensemble_run.data.tags['ensemble_model_uri']
+
     return ensemble_run, ensemble_params
+
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Evaluate entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+def eval_step(train_kwargs, train_params, pipeline_name):
+    eval_run = None; eval_params = None
+    global ensemble_model_uri
+    
+    if(pipeline_name == 'SOURCE'): #dont run ensemble on source ####################################
+        return eval_run, eval_params 
+
+    if 'eval' in train_kwargs['stages'] or 'all' in train_kwargs['stages']:
+        print(f"\n=========== {pipeline_name}: Eval Stage =============")
+        logging.info(f"\n=========== {pipeline_name}: Eval Stage =============")
+
+        eval_params = {
+                'dir_in': train_params['dir_in'],
+                'countries': train_params['countries'],
+                'test_years': train_params['test_years'],
+                'l_window': train_params['l_window'],
+                'f_horizon': train_params['f_horizon'],
+                'model_uri': ensemble_model_uri,
+                'transfer_mode': train_kwargs['transfer_mode']
+        }
+        
+        print(f'eval_params: {eval_params}')
+            
+        eval_run = _get_or_run("eval", parameters=eval_params) 
+    
+    return eval_run, eval_params
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Pipeline ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -255,10 +302,13 @@ def pipeline(train_kwargs):
         etl_run = etl_step(train_kwargs, load_run, load_data_path, pipeline_name)
 
         optuna_run, optuna_params = optuna_step(train_kwargs, pipeline_name)
+        
+        train_run, train_params = train_step(train_kwargs, pipeline_name, optuna_run)
+              
+        ensemble_run, ensemble_params = ensemble_step(train_kwargs, pipeline_name, train_params)
+        
+        eval_run, eval_params = eval_step(train_kwargs, train_params, pipeline_name)
 
-        train_run, train_params = train_step(train_kwargs,pipeline_name,optuna_run)
-
-        ensemble_run, ensemble_params = ensemble_step(train_kwargs,pipeline_name,train_params)
 
 # ################################# Click Parameters ########################################
 # Remove whitespace from your arguments
@@ -276,6 +326,9 @@ def pipeline(train_kwargs):
 @click.option("--n_trials", type=str, default="20", help='number of trials - different tuning oh hyperparams')
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Train Params ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+@click.option('--train_years', type=str, default='2015,2016,2017,2018,2019', help='list of years to use for training set')
+@click.option('--val_years', type=str, default='2020', help='list of years to use for validation set')
+@click.option('--test_years', type=str, default='2021', help='list of years to use for testing set')
 @click.option("--seed", type=str, default="42", help='seed used to set random state to the model')
 @click.option("--max_epochs", type=str, default="200", help='range of number of epochs used by the model')
 @click.option("--n_layers", type=str, default="1", help='range of number of layers used by the model')
@@ -287,6 +340,7 @@ def pipeline(train_kwargs):
 @click.option("--optimizer_name", type=str, default="Adam", help='optimizers experimented by the model') # SGD
 @click.option("--batch_size", type=str, default="1024", help='possible batch sizes used by the model') #16,32,
 @click.option("--transfer_mode", type=str, default="0", help='indicator to use transfer learning techniques')
+@click.option("--tl_model_uri", type=str, default="None", help='tl_model_uri used for accessing model used for transfer learning') 
 @click.option("--num_workers", type=str, default="4", help='accelerator (cpu/gpu) processesors and threads used')
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Ensemble (exclusive) Params ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

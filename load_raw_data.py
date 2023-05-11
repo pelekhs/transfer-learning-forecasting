@@ -54,7 +54,8 @@ def load_raw_data(dir_in, countries):
 
         input_path = input_path.replace('/', os.path.sep)
 
-        with tempfile.TemporaryDirectory() as load_tmpdir: 
+        if not os.path.exists("./temp_files/"): os.makedirs("./temp_files/")
+        with tempfile.TemporaryDirectory(dir='./temp_files/') as load_tmpdir: 
             for root, dirs, files in os.walk(input_path):
                 for name in files:
                     country_name, country_code = find_country(name)

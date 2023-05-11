@@ -5,6 +5,9 @@
 # [here](https://coderzcolumn.com/tutorials/machine-learning/simple-guide-to-optuna-for-hyperparameters-optimization-tuning)
 
 # Let's import some basic libraries
+import math
+import pandas as pd 
+from pandas.tseries.frequencies import to_offset
 from matplotlib import pyplot as plt
 import matplotlib as mpl
 mpl.use("webagg")
@@ -18,7 +21,8 @@ from optuna.integration import PyTorchLightningPruningCallback
 import torch
 import pytorch_lightning as pl
 from pytorch_lightning import Trainer
-# from pytorch_lightning.profiler import Profiler, AdvancedProfiler
+from pytorch_lightning.callbacks import EarlyStopping
+# from pytorch_lightning.profiler import SimpleProfiler, AdvancedProfiler
 
 import os
 import logging
@@ -37,6 +41,7 @@ MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI")
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Globals ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 click_params = None
+freq = None
 
 """
 This function is use by the Optuna library: An open source hyperparameter optimization framework
@@ -71,34 +76,44 @@ def objective(trial):
     """
     global click_params
 
-    max_epochs = trial.suggest_int('max_epochs', click_params.max_epochs[0], click_params.max_epochs[1])
+    max_epochs = click_params.max_epochs #500 #trial.suggest_int('max_epochs', click_params.max_epochs[0], click_params.max_epochs[1])
     n_layers = trial.suggest_int("n_layers", click_params.n_layers[0], click_params.n_layers[1])
 
+    timedelta_freq = pd.to_timedelta(to_offset(freq)) #convert freq to timedelta
+    step = math.floor(pd.Timedelta(hours=24) / timedelta_freq) #how many freq fit in 24 hours 
+    if(not step): step = 1 #if zero, set to one
+
+    # if single item in categorical variables, turn it to a list
+    if isinstance(click_params.optimizer_name, str): click_params.optimizer_name = [click_params.optimizer_name] 
+    if isinstance(click_params.activation, str): click_params.activation = [click_params.activation]
+
     params = {
-        'l_window': trial.suggest_int("l_window", click_params.l_window[0], click_params.l_window[1]),
-        'f_horizon': trial.suggest_int("f_horizon", click_params.f_horizon[0], click_params.f_horizon[1]),
-        'layer_sizes': [trial.suggest_int("n_units_l{}".format(i), click_params.layer_sizes[0], click_params.layer_sizes[1], log=True) for i in range(n_layers)],
-        'l_rate':    trial.suggest_float('l_rate', click_params.l_rate[0], click_params.l_rate[1], log=True), # loguniform will become deprecated
+        'l_window': trial.suggest_categorical("l_window", click_params.l_window), 
+        'f_horizon': 24, 
+        'layer_sizes': [trial.suggest_categorical("n_units_l{}".format(i), click_params.layer_sizes) for i in range(n_layers)], 
+        'l_rate':  trial.suggest_float('l_rate', click_params.l_rate[0], click_params.l_rate[1], log=True), # loguniform will become deprecated
         'activation': trial.suggest_categorical("activation", click_params.activation), #SiLU (Swish) performs good
         'optimizer_name': trial.suggest_categorical("optimizer_name", click_params.optimizer_name),
         'batch_size': trial.suggest_categorical('batch_size', click_params.batch_size),
         'num_workers': click_params.num_workers
     }
 
+    print(params)
+
+    # num_retries = 10
+    # for attempt_no in range(num_retries):
+    #     try:
     # The default logger in PyTorch Lightning writes to event files to be consumed by
     # TensorBoard. We create a simple logger instead that holds the log in memory so that the
     # final accuracy can be obtained after optimization. When using the default logger, the
     # final accuracy could be stored in an attribute of the `Trainer` instead.
-    trainer = Trainer(max_epochs=max_epochs, deterministic=True, logger=True,
-                    #   profiler="simple", #add simple profiler
-                    #   precision=16, # employ half-precision whenever available while maintaining single-precision everywhere else
-                    #   accelerator='auto',
-                    #   devices = 1 if torch.cuda.is_available() else 0,
-                    #   auto_select_gpus=True if torch.cuda.is_available() else False,
-                    #   strategy='ddp', # multi-process single-device training on one or multiple nodes
-                      callbacks=[PyTorchLightningPruningCallback(trial, monitor="val_loss")])
+    trainer = Trainer(max_epochs=max_epochs, deterministic=True, logger=True, 
+                    accelerator='auto', devices = 1 if torch.cuda.is_available() else 0,
+                    auto_select_gpus=True if torch.cuda.is_available() else False,
+                    check_val_every_n_epoch=2,
+                    callbacks=[PyTorchLightningPruningCallback(trial, monitor="val_loss"), 
+                                EarlyStopping(monitor="val_loss", mode="min", verbose=True, patience=10)])
 
-    # torch.set_num_threads(click_params.num_workers)
     pl.seed_everything(click_params.seed, workers=True)    
     model = Regression(**params) # double asterisk (dictionary unpacking)
     trainer.logger.log_hyperparams(params)
@@ -117,7 +132,7 @@ def objective(trial):
 
     trainer.fit(model, train_loader, val_loader)
     return trainer.callback_metrics["val_loss"].item()
-
+                
 #  Example taken from Optuna github page:
 # https://github.com/optuna/optuna-examples/blob/main/pytorch/pytorch_lightning_simple.py
 
@@ -147,6 +162,11 @@ def store_params(study, opt_tmpdir):
     with open('best_trial_diary.txt','a') as trial_diary_file: 
         trial_diary_file.write(str(best_result)+ "\n")
 
+    with open(f"{opt_tmpdir}/best_trial.txt",'a') as trial_file:
+        trial_file.write(f'========= Optuna Best Trial =========\n')
+        for key, value in best_result.items():
+            trial_file.write(f'{key}: {value}\n')
+            
     study.trials_dataframe().to_csv(f"{opt_tmpdir}/trials_dataframe.csv")
                 
 def print_optuna_report(study):
@@ -199,8 +219,10 @@ def optuna_optimize():
                                                 a termination signal such as SIGTERM or Ctrl+C is received.
     """
     study.optimize(objective,
+                #  n_jobs=2,
                 #    timeout=600, # 10 minutes
-                   n_trials=click_params.n_trials)
+                   n_trials=10, #click_params.n_trials,
+                   gc_after_trial=True)
     print_optuna_report(study)
     return study
 
@@ -236,12 +258,14 @@ def optuna_visualize(study, opt_tmpdir):
 @click.option("--dir_in", type=str, default='../preprocessed_data/', help="File containing csv files used by the model")
 @click.option("--countries", type=str, default="Portugal", help='csv names from dir_in used by the model')
 @click.option("--seed", type=str, default="42", help='seed used to set random state to the model')
+@click.option('--train_years', type=str, default='2015,2016,2017,2018,2019', help='list of years to use for training set')
+@click.option('--val_years', type=str, default='2020', help='list of years to use for validation set')
+@click.option('--test_years', type=str, default='2021', help='list of years to use for testing set')
 @click.option("--n_trials", type=str, default="20", help='number of trials - different tuning oh hyperparams')
 @click.option("--max_epochs", type=str, default="5,10", help='range of number of epochs used by the model')
 @click.option("--n_layers", type=str, default="1,2", help='range of number of layers used by the model')
 @click.option("--layer_sizes", type=str, default="90,110", help='range of size of each layer used by the model')
 @click.option("--l_window", type=str, default="220,260", help='range of lookback window (input layer size) used by the model')
-@click.option("--f_horizon", type=str, default="24,25", help='range of forecast horizon (output layer size) used by the model')
 @click.option("--l_rate", type=str, default="1e-5, 1e-4", help='range of learning rate used by the model')
 @click.option("--activation", type=str, default="ReLU,SiLU", help='activations function experimented by the model')
 @click.option("--optimizer_name", type=str, default="Adam,RMSprop", help='optimizers experimented by the model') # SGD
@@ -261,10 +285,11 @@ def forecasting_model(**kwargs):
     """
     with mlflow.start_run(run_name="optuna",nested=True) as optuna_start:
         # Auto log all MLflow entities
-        mlflow.pytorch.autolog()
+        # mlflow.pytorch.autolog()
         
+        if not os.path.exists("./temp_files/"): os.makedirs("./temp_files/")
         # store mlflow metrics/artifacts on temp file
-        with tempfile.TemporaryDirectory() as opt_tmpdir:
+        with tempfile.TemporaryDirectory(dir='./temp_files/') as opt_tmpdir:
 
             global click_params
             click_params = ClickParams(kwargs)
@@ -274,10 +299,15 @@ def forecasting_model(**kwargs):
             
             #  read csv files
             df = read_csvs(click_params)
+            df_backup = df.copy()
+
+            df_backup.set_index('Date',inplace=True)
+            global freq; freq = pd.infer_freq(df_backup.index) #find time frequency of data
+            if(not freq): freq = 'H'
 
             # split data in train/test/validation
             global train_data, test_data, val_data
-            train_data, test_data, val_data = train_test_valid_split(df)
+            train_data, test_data, val_data = train_test_valid_split(df,click_params)
 
             # train_data.to_csv(f"{opt_tmpdir}/train_data.csv")
             # test_data.to_csv(f"{opt_tmpdir}/test_data.csv")

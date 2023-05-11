@@ -17,7 +17,7 @@ all_countries = None
 clustered_countries = {
     'cluster_1': 'Greece,Spain,Croatia,Italy',
     'cluster_2': 'Portugal,Ireland,Serbia,France,Belgium,Netherlands,Hungary',  
-    'cluster_3': 'Ukraine,Romania,Bulgaria,Slovenia,Slovakia,Austria,Germany,Poland,Switcherland',
+    'cluster_3': 'Ukraine,Romania,Bulgaria,Slovenia,Slovakia,Austria,Germany,Poland,Switzerland',
     'cluster_4': 'Norway,Sweden,Denmark,Czechia,Lithuania,Latvia,Estonia,Finland'
 }
 
@@ -49,25 +49,62 @@ def source_target_split(countries):
     
     return source_domain, target_domain
 
+# Writing a Function To Remove a Suffix in Python
+def removesuffix(text, suffix):
+    if text.endswith(suffix):
+        return text[:-len(suffix)]
+    else:
+        return text
+
+def case_0(params):
+    """
+    Case 0: Source and target domain is the same one country (Naive Model)
+    """
+    print("=============== Case 0 ===============")    
+
+    stages = ','.join(params.stages) if isinstance(params.stages,list) else params.stages
+    for idx, country in enumerate(all_countries,1):
+        # if(idx < 26): continue
+        if(idx not in [16]): continue #1,2,3,6,
+        print('==========================================================================')
+        print(f"~~~~~~~~~~~~~~~~ Experiment no. {idx} ~~~~~~~~~~~~~~~~~~~~")               
+        print(f"Source/Target Domain: {country}")
+        print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")       
+        command = (
+            f'mlflow run . --entry-point snaive --env-manager=local ' 
+            f'-P countries={country} -P tgt_country={country} -P time_steps=168 '
+            f'--experiment-name=alex_trash'
+        )     
+        print(command)
+        # break;
+        os.system(command)
+        print('==========================================================================')
+ 
 def case_1(params):
     """
     Case 1: Source and target domain is the same one country
     """
     print("=============== Case 1 ===============")    
 
-    stages = ','.join(params.stages)
+    stages = ','.join(params.stages) if isinstance(params.stages,list) else params.stages
     for idx, country in enumerate(all_countries,1):
+        # if(idx < 26): continue
+        if(idx not in [16]): continue #1,2,3,6,
+        print('==========================================================================')
         print(f"~~~~~~~~~~~~~~~~ Experiment no. {idx} ~~~~~~~~~~~~~~~~~~~~")               
         print(f"Source/Target Domain: {country}")
         print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")       
-        # command = (
-        #     f'mlflow run . --env-manager=local -P stages={stages} '
-        #     f'-P src_countries={country} -P transfer_mode=0 -P test_case=1 ' ## add/remove max_epochs
-        #     f'-P max_epochs=2 -P n_trials=2 -P n_estimators=3 -P batch_size=1024 '
-        #     f'--experiment-name={params.experiment_name}'
-        # )     
-        # print(command)
-        # os.system(command)
+        command = (
+            f'mlflow run . --env-manager=local -P stages={stages} '
+            f'-P src_countries={country} -P transfer_mode=0 -P test_case=1 ' ## add/remove max_epochs
+            # f'-P max_epochs=2 -P n_trials=2 -P n_estimators=3 -P batch_size=1024 '
+            f'--experiment-name=alex_case1_new'
+        )     
+        print(command)
+        # break;
+        os.system(command)
+        print('==========================================================================')
+
     
 def case_2(params):
     """
@@ -81,6 +118,10 @@ def case_2(params):
 
     stages = ','.join(params.stages) if isinstance(params.stages,list) else params.stages
     for idx, (src, tgt) in enumerate(zip(source_domain,target_domain), 1):
+        # if(idx < 12): continue
+        # if(idx > 12): break
+        if(idx not in [22]): continue
+        print('==========================================================================')
         print(f"~~~~~~~~~~~~~~~~ Experiment no. {idx} ~~~~~~~~~~~~~~~~~~~~")               
         print(f"Source Domain: {src}")
         print(f'Target Domain: {tgt}')
@@ -88,16 +129,16 @@ def case_2(params):
         command = (
             f'mlflow run . --env-manager=local -P stages={stages} '
             f'-P src_countries={src} -P tgt_countries={tgt} -P test_case=2 '
-            f'-P transfer_mode={params.transfer_mode} ' ## add/remove max_epochs
-            f'-P max_epochs=2 -P n_trials=2 -P n_estimators=3 -P batch_size=1024 '
-            f'--experiment-name={params.experiment_name}'
+            f'-P transfer_mode={params.transfer_mode} '
+            # f'-P max_epochs=2 -P n_trials=2 -P n_estimators=3 -P batch_size=1024 '
+            f'--experiment-name=alex_case2_new'
         )     
         print(command)
         os.system(command)
-        break;
+        print('==========================================================================')
 
 def case_3(params):
-    idx = 1
+    idx = 0
 
     for cluster in clustered_countries.values():
         countries = cluster.split(',')
@@ -108,24 +149,29 @@ def case_3(params):
         stages = ','.join(params.stages) if isinstance(params.stages,list) else params.stages
 
         for src, tgt in zip(source_domain,target_domain):
+            idx += 1
+            if(idx < 1): continue
+            if(idx > 1): break    
+            print('==========================================================================')
             print(f"~~~~~~~~~~~~~~~~ Experiment no. {idx} ~~~~~~~~~~~~~~~~~~~~")               
             print(f"Source Domain: {src}")
             print(f'Target Domain: {tgt}')
             print("~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~")  
-            # command = (
-            #     f'mlflow run . --env-manager=local -P stages={stages} '
-            #     f'-P src_countries={src} -P tgt_countries={tgt} -P test_case=2 '
-            #     f'-P transfer_mode={params.transfer_mode} ' ## add/remove max_epochs
-            #     f'-P max_epochs=2 -P n_trials=2 -P n_estimators=3 -P batch_size=1024 '
-            #     f'--experiment-name={params.experiment_name}'
-            # )     
-            # print(command)
+            command = (
+                f'mlflow run . --env-manager=local -P stages={stages} '
+                f'-P src_countries={src} -P tgt_countries={tgt} -P test_case=3 '
+                f'-P transfer_mode={params.transfer_mode} ' 
+                # f'-P max_epochs=2 -P n_trials=2 -P n_estimators=3 -P batch_size=1024 '
+                f'--experiment-name=alex_case3_new'
+            )     
+            print(command)
             # os.system(command)
-            idx += 1
-            # if(idx > 0): return;
+            print('==========================================================================')
+
 
 #### Enum used to define test case used in run of test_script  
 class TestCase(IntEnum):
+    NAIVE = 0
     BENCHMARK = 1
     ALL_FOR_ONE = 2 
     CLUSTER_FOR_ONE = 3
@@ -133,7 +179,7 @@ class TestCase(IntEnum):
 # Remove whitespace from your arguments
 @click.command()
 @click.option("--case", type=str, default="1", help='test cases to use')
-@click.option("--stages", type=str, default='model', help='comma seperated entry point names to execute from pipeline')
+@click.option("--stages", type=str, default='all', help='comma seperated entry point names to execute from pipeline')
 @click.option("--transfer_mode", type=str, default="1", help='indicator to use transfer learning techniques')
 @click.option("--experiment_name", type=str, default="alex_trash", help='indicator to use transfer learning techniques')
 
@@ -141,10 +187,11 @@ def test_script(**kwargs):
 
     global all_countries
     all_countries = os.listdir('../preprocessed_data/') #get list of countries
-    all_countries = [x.rstrip('.csv') for x in all_countries] # remove '.csv' suffix in each one
+    all_countries = [removesuffix(x,'.csv') for x in all_countries] # remove '.csv' suffix in each one
 
     click_params = ClickParams(kwargs)
 
+    if(TestCase(click_params.case) == TestCase.NAIVE): case_0(click_params)
     if(TestCase(click_params.case) == TestCase.BENCHMARK): case_1(click_params)
     if(TestCase(click_params.case) == TestCase.ALL_FOR_ONE): case_2(click_params)
     if(TestCase(click_params.case) == TestCase.CLUSTER_FOR_ONE): case_3(click_params)

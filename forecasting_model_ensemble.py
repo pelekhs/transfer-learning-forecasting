@@ -31,7 +31,14 @@ import tempfile
 # Custom made classes and functions used for reading/processing data at input/output of model
 from model_utils import ClickParams, Regression
 from model_utils import read_csvs, train_test_valid_split, feature_target_split, \
-                        cross_plot_pred_data, calculate_metrics
+                        cross_plot_actual_pred, calculate_metrics
+# get environment variables
+from dotenv import load_dotenv
+load_dotenv()
+# explicitly set MLFLOW_TRACKING_URI as it cannot be set through load_dotenv
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI")
+
+test_X,test_Y = None, None
 
 def findNewRows(N,K):
     """
@@ -67,7 +74,7 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
     """
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # torch.set_num_threads(click_params.num_workers)
+    torch.set_num_threads(click_params.num_workers) ######################################
     pl.seed_everything(click_params.seed, workers=True)  
 
     best_params = {}; best_params.update(vars(click_params)); del best_params['n_estimators']
@@ -84,6 +91,7 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
     # create datasets used by dataloaders
         # 'subset'_X: dataset containing features of subset (train/test/validation) dataframe
         # 'subset'_Y: dataset containing targets of subset (train/test/validation) dataframe
+    global test_X,test_Y # used by MASE metric 
     train_X, train_Y = feature_target_split(train_data,click_params.l_window,click_params.f_horizon)  
     test_X, test_Y = feature_target_split(test_data,click_params.l_window,click_params.f_horizon)
     validation_X, validation_Y = feature_target_split(val_data,click_params.l_window,click_params.f_horizon)      
@@ -104,29 +112,28 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
         ensemble_model = getattr(torchensemble,regressor)(
             estimator=regression_model,
             n_estimators=n_estimators, 
-            # n_jobs=click_params.num_workers, ####################
             cuda=True if torch.cuda.is_available() else False
         )
         io.load(ensemble_model, save_dir)  # reload
     else:
         # Define the ensemble
-        ensemble_model = torchensemble.BaggingRegressor(
+        ensemble_model = torchensemble.VotingRegressor(
             estimator=regression_model,
             n_estimators=click_params.n_estimators,
-            # n_jobs=click_params.num_workers, ########################
             cuda=True if torch.cuda.is_available() else False 
         )
         ensemble_model.to(device)
 
         # Set the criterion
-        criterion = MeanAbsolutePercentageError(); criterion.to(device)
+        criterion = nn.MSELoss(); criterion.to(device)
+        # criterion = MeanAbsolutePercentageError(); criterion.to(device)
         ensemble_model.set_criterion(criterion)
 
         # Set the optimizer
         ensemble_model.set_optimizer(optimizer_name=click_params.optimizer_name,
                                     lr=click_params.l_rate)
 
-        ensemble_model.fit(epochs=5, #click_params.max_epochs,
+        ensemble_model.fit(epochs=100, #click_params.max_epochs,
                         train_loader=train_loader,
                         test_loader=val_loader,
                         save_model=True,
@@ -155,7 +162,7 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
     # divisible by lookback_window to be fed as batches to predict
     new_len = findNewRows(len(actuals_X),click_params.l_window)
     actuals_X = actuals_X[:new_len]
-    print(f"new_len: {new_len}")
+    # print(f"new_len: {new_len}")
 
     # reshape 1-D matrix (created by list train_X) for it to be multipled by input layer matrix
     # matrix shape: [any, lookback_window]
@@ -183,6 +190,9 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
 @click.option("--dir_in", type=str, default='../preprocessed_data/', help="File containing csv files used by the model")
 @click.option("--countries", type=str, default="Portugal", help='csv names from dir_in used by the model')
 @click.option("--seed", type=str, default="42", help='seed used to set random state to the model')
+@click.option('--train_years', type=str, default='2015,2016,2017,2018,2019', help='list of years to use for training set')
+@click.option('--val_years', type=str, default='2020', help='list of years to use for validation set')
+@click.option('--test_years', type=str, default='2021', help='list of years to use for testing set')
 @click.option("--max_epochs", type=str, default="2", help='range of number of epochs used by the model')
 @click.option("--n_layers", type=str, default="1", help='range of number of layers used by the model')
 @click.option("--layer_sizes", type=str, default="100", help='range of size of each layer used by the model')
@@ -195,6 +205,7 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
 @click.option("--transfer_mode", type=str, default="0", help='indicator to use transfer learning techniques')
 @click.option("--n_estimators", type=str, default="3", help='number of estimators (models) used in ensembling')
 @click.option("--num_workers", type=str, default="4", help='accelerator (cpu/gpu) processesors and threads used') 
+@click.option('--time_steps', type=str, default='168', help='naive model time lags')
 
 def forecasting_model(**kwargs):
     """
@@ -212,8 +223,9 @@ def forecasting_model(**kwargs):
         # Auto log all MLflow entities
         mlflow.pytorch.autolog()
 
+        if not os.path.exists("./temp_files/"): os.makedirs("./temp_files/")
         # store mlflow metrics/artifacts on temp file
-        with tempfile.TemporaryDirectory() as ensemble_tmpdir: 
+        with tempfile.TemporaryDirectory(dir='./temp_files/') as ensemble_tmpdir: 
 
             global click_params
             click_params = ClickParams(kwargs)
@@ -227,20 +239,20 @@ def forecasting_model(**kwargs):
 
             # split data in train/test/validation
             global train_data, test_data, val_data
-            train_data, test_data, val_data = train_test_valid_split(df)
+            train_data, test_data, val_data = train_test_valid_split(df,click_params)
 
             # train_data.to_csv(f"{ensemble_tmpdir}/train_data.csv")
             # test_data.to_csv(f"{ensemble_tmpdir}/test_data.csv")
             # val_data.to_csv(f"{ensemble_tmpdir}/val_data.csv")
 
             # train model with hparams set to best_params of optuna 
-            plot_pred, plot_actual = ensemble(load=False, save_dir=ensemble_tmpdir)
+            pred, actual = ensemble(load=False, save_dir=ensemble_tmpdir)
 
             # calculate metrics
-            metrics = calculate_metrics(plot_actual,plot_pred)
+            metrics = calculate_metrics(actual,pred,df_backup,click_params)
 
             # plot prediction/actual data on common axis system 
-            cross_plot_pred_data(df_backup, plot_pred, plot_actual, ensemble_tmpdir)
+            cross_plot_actual_pred(df_backup, pred, actual, ensemble_tmpdir)
 
             print("\nUploading training csvs and metrics to MLflow server...")
             logging.info("\nUploading training csvs and metrics to MLflow server...")

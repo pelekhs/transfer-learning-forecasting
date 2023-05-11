@@ -1,22 +1,28 @@
+import numpy as np
 import pandas as pd
 from enum import IntEnum
 from datetime import datetime
 import pathlib
 from matplotlib import pyplot as plt
+import random
 # import matplotlib as mpl
 # mpl.use("webagg")
 import warnings
-# warnings.filterwarnings("ignore", ".*Consider increasing the value of the `num_workers` argument*")
 
 import sys
 import copy
 import os
+import gc
+import tempfile
+import requests
 
 from sklearn import preprocessing
 from sklearn.metrics import mean_squared_error
 from sklearn.metrics import mean_absolute_error
 from sklearn.metrics import mean_absolute_percentage_error
 from sklearn.metrics import r2_score
+
+from darts.models import NaiveSeasonal
 
 import torch
 import torch.nn as nn
@@ -43,23 +49,6 @@ test_data = None
 val_data = None
 
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Classes ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~    
-class DataScaler:
-    def __init__(self, min=0,max=1):
-        super(DataScaler, self).__init__()
-        self.min = min
-        self.max = max
-        self.scaler = preprocessing.MinMaxScaler(feature_range=(min, max))
-
-    def scale_transform(self, dframe, columns=['Load']):
-        temp_df = copy.deepcopy(dframe)
-        temp_df['Load'] = self.scaler.fit_transform(dframe[columns])
-        return temp_df
-
-    def inverse_scale_transform(self, dframe, columns=['Load']):
-        temp_df = copy.deepcopy(dframe)
-        temp_df[columns] = self.scaler.inverse_transform(dframe[columns])
-        return temp_df
-
 #### Enum used to define transfer learning techniques used  
 class Transfer(IntEnum):
     NO_TRANSFER = 0
@@ -82,7 +71,9 @@ class ClickParams:
         for key, value in click_args.items():
             if(isinstance(value, bool)):
                setattr(self, key, value); continue 
-
+            if(os.sep in value): # differentiate between dir_in and optimizer/activation
+               setattr(self, key, value); continue 
+     
             split_value = value.split(',') # split string into a list delimited by comma
 
             if not split_value: # if empty list
@@ -91,9 +82,9 @@ class ClickParams:
             if(len(split_value) == 1): # if single value, check if int/float/str
                 if(value.isdigit()): setattr(self, key, int(value)); continue;
                 if(self.is_floats(value)): setattr(self, key, float(value)); continue;
-                else: setattr(self, key, value); continue; # categorical shoul be kept as a list  
+                else: setattr(self, key, value); continue; # categorical should be kept as a list  
 
-            # since value is not a list
+            # since value is a list
             if all(ele.isdigit() for ele in split_value): # if all characters in each value in list are digits (int)
                 setattr(self, key, [int(x) for x in split_value]); continue;
             elif self.is_floats(split_value): # check if all values in list can be converted to floats (decimals or scientific notation)
@@ -163,7 +154,10 @@ def search_proper_run():
     # find best pretrained model by searching runs with
     # search only runs in 'model' stage and without transfer learning
     filter_string = f'tags.stage = "model" and tags.transfer = "NO_TRANSFER"' 
-    best_run = mlflow.search_runs(experiment_names=["alex_trash"],
+    run_id = mlflow.active_run().info.run_id
+    experiment_id = mlflow.get_run(run_id).info.experiment_id
+
+    best_run = mlflow.search_runs(experiment_ids=[experiment_id],# experiment_names=["alex_trash"],
                                   output_format='list',
                                   filter_string=filter_string,
                                   run_view_type=ViewType.ACTIVE_ONLY,
@@ -201,7 +195,12 @@ class Regression(pl.LightningModule):
     def __init__(self, **params):
         super(Regression, self).__init__()
 
-        self.loss = MeanAbsolutePercentageError() #MAPE
+        # used by trainer logger (check log_graph flag)
+        # example of input use by model (random tensor of same size)
+        self.example_input_array = torch.rand(params['l_window'])
+
+        # self.loss = MeanAbsolutePercentageError() #MAPE
+        self.loss = nn.MSELoss()
 
         # by default, no transfer learning, init in case of optuna/ensemble        
         self.transfer_mode = Transfer(params['transfer_mode']) if('transfer_mode'in params) \
@@ -240,9 +239,13 @@ class Regression(pl.LightningModule):
             self.classifier = nn.Linear(last_dim, output_dim)
         else:
             # get best pretrained model and load its feature extractor
-            best_run = search_proper_run()
-            model = mlflow.pytorch.load_model(f"runs:/{best_run.info.run_id}/model")
-            mlflow.set_tag("tranfer_model_runID", best_run.info.run_id)        
+            # best_run = search_proper_run()
+            # model = mlflow.pytorch.load_model(f"runs:/{best_run.info.run_id}/model")
+            # mlflow.set_tag("tranfer_model_runID", best_run.info.run_id) 
+            
+            model = mlflow.pytorch.load_model(self.hparams.tl_model_uri)
+            print(f"Found best model with uri: {self.hparams.tl_model_uri}")
+            mlflow.set_tag("tl_model_used", self.hparams.tl_model_uri)
 
             # checkpoint_path = mlflow.artifacts.download_artifacts(f"runs:/{best_run.info.run_id}/train_results/checkpoint.ckpt")
             # print(f'checkpoint_path: {checkpoint_path}') 
@@ -384,6 +387,12 @@ class Regression(pl.LightningModule):
     def predict_step(self, batch, batch_idx):
         x, y = batch
         return self.forward(x)
+        
+    def on_train_epoch_end(self):
+        gc.collect()
+
+    def on_validation_epoch_end(self):
+        gc.collect()
 
 ## Loading Data
 def read_csvs(click_params):
@@ -438,7 +447,7 @@ def read_csvs(click_params):
 # #### Train / test / validation split
 # This is a timeseries problem, so it would be typical to train on the earlier data, and test / validate on the later data.
 
-def train_test_valid_split(df):
+def train_test_valid_split(df,click_params):
     """
     we choose to split data with validation/test data to be at the end of time series
     Since it's a time series, it is intuitive to predict future values, rather than values in between
@@ -458,9 +467,14 @@ def train_test_valid_split(df):
     # drop all columns except 'Load' (use 'backup_df' to restore them)
     global train_data, test_data, val_data
 
-    train_data = df[~df['year'].isin(['2020','2021'])][['Load']] 
-    test_data = df[df['year'] == 2021][['Load']]
-    val_data = df[df['year'] == 2020][['Load']]
+
+    train_data = df[~df['year'].isin([click_params.val_years,click_params.test_years])][['Load']] 
+    test_data = df[df['year'] == click_params.test_years][['Load']]
+    val_data = df[df['year'] == click_params.val_years][['Load']]
+
+    # train_data = df[~df['year'].isin(['2020','2021'])][['Load']] 
+    # test_data = df[df['year'] == 2021][['Load']]
+    # val_data = df[df['year'] == 2020][['Load']]
 
     return train_data, test_data, val_data
 
@@ -516,7 +530,7 @@ def feature_target_split(df, lookback_window=168, forecast_horizon=36):# lookbac
                             
     return df_new.iloc[:,:lookback_window] , df_new.iloc[:,-forecast_horizon:]
 
-def cross_plot_pred_data(df_backup, plot_pred_r, plot_actual_r, tmpdir):
+def cross_plot_actual_pred(df_backup, plot_pred_r, plot_actual_r, tmpdir):
     """
     Function used to plot lists of target labels and their predictions from the model
     in a shared axis system
@@ -542,26 +556,75 @@ def cross_plot_pred_data(df_backup, plot_pred_r, plot_actual_r, tmpdir):
     ax.set_xticklabels(datesx[::N], rotation=45)
     ax.legend();
 
-    # display it on window/browser tab
-    # plt.show()
-
     plt.savefig(f"{tmpdir}/cross_plot.png")
     plt.close()
 
-def calculate_metrics(plot_actual,plot_pred):
+from darts import TimeSeries
+from darts.metrics import mape as mape_darts
+from darts.metrics import mase as mase_darts
+from darts.metrics import mae as mae_darts
+from darts.metrics import rmse as rmse_darts
+from darts.metrics import smape as smape_darts
+from darts.metrics import mse as mse_darts
 
+def convert_list_to_timeseries(data,dates,row_dim):
+    listed_data = [data[i: i+row_dim] for i in range(0, len(data), row_dim)]
+
+    column_names = [f"Data_{i}" for i in range(0,row_dim)]
+    series_df = pd.DataFrame(data=listed_data,columns=column_names)
+    value_cols = list(series_df.columns)
+    series_df['Dates'] = dates[:len(series_df)]
+
+    print(f'Dataframe shape: {series_df.shape}')
+    series =  TimeSeries.from_dataframe(series_df, time_col='Dates', value_cols=value_cols)
+    return series
+
+def calculate_metrics(actual,pred,df_backup,click_params):
+    
+    # actual_series = TimeSeries.from_values(np.array(actual))
+    # pred_series = TimeSeries.from_values(np.array(pred))
+
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+    # (re)make dataframes or train/test data
+    train_df = df_backup[~df_backup['year'].isin([click_params.test_years])][['Date','Load']] 
+    test_df = df_backup[df_backup['year'] == click_params.test_years][['Date','Load']]
+
+    # make dataframe an replace initial load data with processed/prediction data
+    actual_df = test_df[['Date']].copy(); actual_df['Load'] = pd.DataFrame(actual)
+    pred_df = test_df[['Date']].copy(); pred_df['Load'] = pd.DataFrame(pred)
+
+    # print(pred_df.head(2))
+    # pd.date_range(start=test_df['Date'][0], end = test_df['Date'][-1], freq='D')
+
+    # convert dataframes to darts timeseries
+    train_series = TimeSeries.from_dataframe(train_df, time_col='Date', value_cols='Load')
+    # test_series = TimeSeries.from_dataframe(test_df, time_col='Date', value_cols='Load')
+    actual_series = TimeSeries.from_dataframe(actual_df, time_col='Date', value_cols='Load')
+    pred_series = TimeSeries.from_dataframe(pred_df, time_col='Date', value_cols='Load')
+
+    # create model and create forecasts
+    # model = NaiveSeasonal(K = click_params.time_steps)
+    # model.fit(train_series)
+    # forecast_series = model.predict(len(test_series))
+
+    # print(pred_series)
+    print(actual_df)
+    print(train_df)
+    # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 
     # Evaluate the model prediction
     metrics = {
-        "MSE" : mean_squared_error(plot_actual, plot_pred, squared=True),
-        "RMSE" : mean_squared_error(plot_actual, plot_pred, squared=False),
-        "MAE" : mean_absolute_error(plot_actual, plot_pred),
-        "MAPE" : mean_absolute_percentage_error(plot_actual, plot_pred),
-        "R_squared": r2_score(plot_actual, plot_pred)
+        "MAPE": mape_darts(actual_series,pred_series),
+        "SMAPE": smape_darts(actual_series,pred_series),
+        "MASE": mase_darts(actual_series,pred_series,train_series,m=click_params.time_steps),
+        "MAE": mae_darts(actual_series,pred_series),
+        "MSE": mse_darts(actual_series,pred_series),
+        "RMSE": rmse_darts(actual_series,pred_series)
     }
-
+    
     print("  Metrics: ")
     for key, value in metrics.items():
         print("    {}: {}".format(key, value))
-    print(f"Mean Absolute Percentage Error (MAPE): {metrics['MAPE']*100} %")
 
     return metrics
