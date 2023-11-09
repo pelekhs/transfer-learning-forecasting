@@ -123,7 +123,7 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
             cuda=True if torch.cuda.is_available() else False 
         )
         ensemble_model.to(device)
-
+        
         # Set the criterion
         criterion = nn.MSELoss(); criterion.to(device)
         # criterion = MeanAbsolutePercentageError(); criterion.to(device)
@@ -133,11 +133,22 @@ def ensemble(load=True, save_dir='./ensemble_models/', ensemble_filename='Baggin
         ensemble_model.set_optimizer(optimizer_name=click_params.optimizer_name,
                                     lr=click_params.l_rate)
 
-        ensemble_model.fit(epochs=100, #click_params.max_epochs,
+        ensemble_model.fit(epochs=click_params.max_epochs,
                         train_loader=train_loader,
                         test_loader=val_loader,
                         save_model=True,
                         save_dir=f'{save_dir}') #save to temp_dir (mlflow) or to local path
+
+        # Determine incremented filename
+        i = 0
+        while os.path.exists(f"estimarors_{i}.pkl"):
+            i += 1
+
+        estimators_file = open(f"estimators_{i}.pkl", "w")
+
+        for module in range(len(ensemble_model.estimators_)):
+            print(ensemble_model.estimators_[module].named_parameters)
+            # estimators_file.write(ensemble_model.estimators_[module].named_parameters)
 
     mse_loss = ensemble_model.evaluate(test_loader)
     print(f'Testing mean squared error of the fitted ensemble: {mse_loss}')
@@ -247,6 +258,8 @@ def forecasting_model(**kwargs):
 
             # train model with hparams set to best_params of optuna 
             pred, actual = ensemble(load=False, save_dir=ensemble_tmpdir)
+            pd.DataFrame(actual).to_csv(f"{ensemble_tmpdir}/actual_data.csv")
+            pd.DataFrame(pred).to_csv(f"{ensemble_tmpdir}/pred_data.csv")
 
             # calculate metrics
             metrics = calculate_metrics(actual,pred,df_backup,click_params)

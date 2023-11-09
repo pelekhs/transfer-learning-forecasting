@@ -108,7 +108,8 @@ def objective(trial):
     # final accuracy can be obtained after optimization. When using the default logger, the
     # final accuracy could be stored in an attribute of the `Trainer` instead.
     trainer = Trainer(max_epochs=max_epochs, deterministic=True, logger=True, 
-                    accelerator='auto', devices = 1 if torch.cuda.is_available() else 0,
+                    # accelerator='auto', 
+                    # devices = 1 if torch.cuda.is_available() else 0,
                     auto_select_gpus=True if torch.cuda.is_available() else False,
                     check_val_every_n_epoch=2,
                     callbacks=[PyTorchLightningPruningCallback(trial, monitor="val_loss"), 
@@ -332,4 +333,5 @@ def forecasting_model(**kwargs):
 if __name__ == '__main__':
     print("\n=========== Optuna Hyperparameter Tuning =============")
     logging.info("\n=========== Optuna Hyperparameter Tuning =============")
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)    
     forecasting_model()

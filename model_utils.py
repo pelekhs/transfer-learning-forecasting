@@ -59,9 +59,11 @@ class Transfer(IntEnum):
 
 #### Enum used to define test case used in run of test_script  
 class TestCase(IntEnum):
+    NAIVE = 0
     BENCHMARK = 1
     ALL_FOR_ONE = 2 
     CLUSTER_FOR_ONE = 3
+    GLOBAL = 4
 
 #### Class used to store and utilize click arguments passed to the script
 class ClickParams:
@@ -475,7 +477,10 @@ def train_test_valid_split(df,click_params):
     # train_data = df[~df['year'].isin(['2020','2021'])][['Load']] 
     # test_data = df[df['year'] == 2021][['Load']]
     # val_data = df[df['year'] == 2020][['Load']]
-
+    # print(df)
+    # print(train_data)
+    # print(val_data)
+    # print(test_data)
     return train_data, test_data, val_data
 
 def feature_target_split(df, lookback_window=168, forecast_horizon=36):# lookback_window: 168 = 7 days(* 24 hours)
@@ -580,37 +585,30 @@ def convert_list_to_timeseries(data,dates,row_dim):
     return series
 
 def calculate_metrics(actual,pred,df_backup,click_params):
-    
-    # actual_series = TimeSeries.from_values(np.array(actual))
-    # pred_series = TimeSeries.from_values(np.array(pred))
-
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-    # (re)make dataframes or train/test data
     train_df = df_backup[~df_backup['year'].isin([click_params.test_years])][['Date','Load']] 
     test_df = df_backup[df_backup['year'] == click_params.test_years][['Date','Load']]
+
+    test_df = test_df.sort_values('Date').drop_duplicates('Date',keep='first')
+    train_df = train_df.sort_values('Date').drop_duplicates('Date',keep='first')
 
     # make dataframe an replace initial load data with processed/prediction data
     actual_df = test_df[['Date']].copy(); actual_df['Load'] = pd.DataFrame(actual)
     pred_df = test_df[['Date']].copy(); pred_df['Load'] = pd.DataFrame(pred)
 
-    # print(pred_df.head(2))
-    # pd.date_range(start=test_df['Date'][0], end = test_df['Date'][-1], freq='D')
+    # actual_df.to_csv('actual.csv')
+    # pred_df.to_csv('pred.csv')
+    # train_df.to_csv('train.csv')
 
     # convert dataframes to darts timeseries
     train_series = TimeSeries.from_dataframe(train_df, time_col='Date', value_cols='Load')
-    # test_series = TimeSeries.from_dataframe(test_df, time_col='Date', value_cols='Load')
     actual_series = TimeSeries.from_dataframe(actual_df, time_col='Date', value_cols='Load')
     pred_series = TimeSeries.from_dataframe(pred_df, time_col='Date', value_cols='Load')
 
-    # create model and create forecasts
-    # model = NaiveSeasonal(K = click_params.time_steps)
-    # model.fit(train_series)
-    # forecast_series = model.predict(len(test_series))
-
-    # print(pred_series)
-    print(actual_df)
-    print(train_df)
+    # print(train_series)
+    print(actual_series)
+    print(pred_series)
     # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  
     # Evaluate the model prediction

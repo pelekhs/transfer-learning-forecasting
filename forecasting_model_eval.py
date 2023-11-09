@@ -91,7 +91,7 @@ def test_best_model(test_loader):
 @click.option("--dir_in", type=str, default='../preprocessed_data/', help="File containing csv files used by the model")
 @click.option("--countries", type=str, default="Portugal", help='csv names from dir_in used by the model')
 @click.option('--test_years', type=str, default='2021', help='list of years to use for testing set')
-@click.option('--model_uri', type=str, default=None, help='model uri used')
+@click.option('--model_uri', type=str, default='None', help='model uri used')
 @click.option("--l_window", type=str, default="240", help='range of lookback window (input layer size) used by the model')
 @click.option("--f_horizon", type=str, default="24", help='range of forecast horizon (output layer size) used by the model')
 @click.option("--transfer_mode", type=str, default="0", help='indicator to use transfer learning techniques')

@@ -32,30 +32,31 @@ test_X,test_Y = None, None # used by MASE metric
 def train_test_naive_model(df, train_tmpdir):
 
     # split data to train and test (and validation but not needed)
-    # train_data = df[~df['year'].isin([click_params.val_years,click_params.test_years])][['Date','Load']] 
-    train_data = df[~df['year'].isin([click_params.test_years])][['Date','Load']] 
     test_data = df[df['year'] == click_params.test_years][['Date','Load']]
-    # val_data = df[df['year'] == click_params.val_years][['Date','Load']]
-
-    # train and validation are now in one when as time series
-    train_series = TimeSeries.from_dataframe(train_data, time_col='Date', value_cols='Load')
     test_series = TimeSeries.from_dataframe(test_data, time_col='Date', value_cols='Load')
+
+    df_series = TimeSeries.from_dataframe(df, time_col='Date', value_cols='Load')
+
+    # get earliest date of test series
+    train_end = test_data['Date'].min()
+    test_start = train_end - pd.Timedelta(click_params.time_steps-2, unit='h')
 
     # create model and create forecasts
     model = NaiveSeasonal(K = click_params.time_steps)
-    model.fit(train_series)
-    forecast_series = model.predict(len(test_series))
+    forecast_series = model.historical_forecasts(df_series,
+                                                 start=test_start,
+                                                 forecast_horizon=click_params.time_steps,
+                                                 verbose=True,
+                                                 stride=1)
     
     #store trained model to mlflow with input singature
-    pickle.dump(model, open(f"{train_tmpdir}/_snaive_model.pkl", "wb"))
-    # signature = infer_signature(train_data.head(1), forecast_series.pd_dataframe().head(2))
-    # mlflow.pyfunc.log_model(train_tmpdir, "model", signature=signature)
+    pickle.dump(model, open(f"{train_tmpdir}/snaive_model.pkl", "wb"))
 
     # Evaluate the model prediction
     metrics = {
         "MAPE": mape_darts(test_series, forecast_series),
         "SMAPE": smape_darts(test_series, forecast_series),
-        "MASE": mase_darts(test_series, forecast_series, train_series),
+        "MASE": mase_darts(test_series, forecast_series, df_series[:train_end], m=click_params.time_steps),
         "MAE": mae_darts(test_series, forecast_series),
         "MSE": mse_darts(test_series, forecast_series),
         "RMSE": rmse_darts(test_series, forecast_series)

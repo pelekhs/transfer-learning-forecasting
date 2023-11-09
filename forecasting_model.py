@@ -61,7 +61,8 @@ def train_test_best_model(train_tmpdir):
     trainer = Trainer(max_epochs=max_epochs, deterministic=True,
                       profiler=SimpleProfiler(dirpath=f'{train_tmpdir}/profiler_reports/', filename='profiler_report'), #add simple profiler
                       logger= CSVLogger(save_dir=train_tmpdir),
-                      accelerator='auto', devices = 1 if torch.cuda.is_available() else 0,
+                    #   accelerator='auto', 
+                    #   devices = 1 if torch.cuda.is_available() else 0,
                       auto_select_gpus=True if torch.cuda.is_available() else False,
                       check_val_every_n_epoch=2,
                       callbacks=[EarlyStopping(monitor="val_loss", mode="min", verbose=True, patience=10)]) 
@@ -150,7 +151,7 @@ def forecasting_model(**kwargs):
     with mlflow.start_run(run_name="train",nested=True) as train_start:
 
         # Auto log all MLflow entities
-        mlflow.pytorch.autolog()
+        # mlflow.pytorch.autolog()
 
         if not os.path.exists("./temp_files/"): os.makedirs("./temp_files/")
         # store mlflow metrics/artifacts on temp file
@@ -175,7 +176,7 @@ def forecasting_model(**kwargs):
             pred, actual = train_test_best_model(train_tmpdir)
 
             # calculate metrics
-            metrics = calculate_metrics(actual,pred,df_backup,click_params)
+            metrics = calculate_metrics(actual,pred,df_backup)
 
             # plot prediction/actual data on common axis system 
             cross_plot_actual_pred(df_backup, pred, actual, train_tmpdir)

@@ -176,7 +176,7 @@ def optuna_step(train_kwargs, pipeline_name):
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Train entrypoint ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 def train_step(train_kwargs, pipeline_name, optuna_run):
-    train_run = None; train_params = None
+    train_run = None; train_params = None; best_run = None
     global tl_model_uri
 
     if 'model' in train_kwargs['stages'] or 'all' in train_kwargs['stages']:
@@ -212,8 +212,14 @@ def train_step(train_kwargs, pipeline_name, optuna_run):
         else:
             print("\n########### Hyperparams loaded from source model ###########")
             logging.info("\n########### Hyperparams loaded from source model ###########")
-            
-            best_run = search_proper_run()
+            print(best_run)
+            if(train_kwargs['tl_model_uri'] == 'None'): #if there is transfer learning model uri, no need to search            
+                best_run = search_proper_run()
+            else:
+                best_run = mlflow.get_run(run_id=train_kwargs['tl_model_uri'])
+
+            print(best_run)
+
             transfer_params = copy.deepcopy(best_run.data.params)
 
             print(f'transfer_params: {transfer_params}')
@@ -224,9 +230,15 @@ def train_step(train_kwargs, pipeline_name, optuna_run):
             train_params['dir_in'] = train_kwargs['dir_in']
             train_params['countries'] = train_kwargs['countries']
             train_params['transfer_mode'] = train_kwargs['transfer_mode']     
-
+            
+            print(train_params)
             # retrieve transfer learning model from relative source run     
-            train_params['tl_model_uri'] = tl_model_uri
+            if(tl_model_uri):
+                train_params['tl_model_uri'] = tl_model_uri
+            else:
+                train_params['tl_model_uri'] = f'runs:/{best_run.info.run_id}/model' 
+                 
+            print(train_params)
 
             train_run = _get_or_run("model", parameters=train_params) 
 
@@ -253,7 +265,7 @@ def ensemble_step(train_kwargs, pipeline_name, train_params):
             
         ensemble_run = _get_or_run("ensemble", parameters=ensemble_params) 
 
-        if(pipeline_name == 'SOURCE'):
+        if(pipeline_name == 'SOURCE' or train_kwargs['tl_model_uri'] != 'None'):
             ensemble_model_uri = ensemble_run.data.tags['ensemble_model_uri']
 
     return ensemble_run, ensemble_params
@@ -347,6 +359,7 @@ def pipeline(train_kwargs):
 @click.option("--n_estimators", type=str, default="3", help='number of estimators (models) used in ensembling')
 
 def workflow(**kwargs):
+    train_kwargs = None
     # Note: The entrypoint names are defined in MLproject. The artifact directories
     # are documented by each step's .py file.
     with mlflow.start_run(run_name="main") as main_run:
@@ -359,12 +372,16 @@ def workflow(**kwargs):
         #       > NO_TRANSFER 
         #   - 'tgt_countries' element's value when in target domain's pipeline
         #       > transfer technique (if set for transfer learning)
+
         exclusion_list = ['test_case','src_countries','tgt_countries']
         train_kwargs = {x: kwargs[x] for x in kwargs if x not in exclusion_list}
         train_kwargs['countries'] = kwargs['src_countries']
+
+        # in case there is already a model, to be used, this is not needed
         train_kwargs['transfer_mode'] = str(Transfer.NO_TRANSFER.value)
 
-        pipeline(train_kwargs)
+        if(train_kwargs['tl_model_uri'] == 'None'):
+            pipeline(train_kwargs)
 
         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Target Domain ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         # if there is transfer learning

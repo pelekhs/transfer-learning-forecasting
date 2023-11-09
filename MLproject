@@ -14,8 +14,8 @@ entry_points:
       train_years: {type: str, default: '2015,2016,2017,2018,2019'}
       val_years: {type: str, default: '2020'}
       test_years: {type: str, default: '2021'}
-      n_trials: {type: str, default: '100'}
-      max_epochs: {type: str, default: '500'}
+      n_trials: {type: str, default: '2'}
+      max_epochs: {type: str, default: '3'}
       n_layers: {type: str, default: '1'}
       layer_sizes: {type: str, default: "100"}
       l_window: {type: str, default: '240'}
@@ -27,7 +27,7 @@ entry_points:
       transfer_mode: {type: str, default: "0"}
       num_workers: {type: str, default: '2'}
       tl_model_uri: {type: str, default: 'None'}
-      n_estimators: {type: str, default: '20'}
+      n_estimators: {type: str, default: '3'}
       test_case: {type: str, default: '1'}
     command: "python main.py \
               --stages {stages} \
@@ -80,9 +80,9 @@ entry_points:
       train_years: {type: str, default: '2015,2016,2017,2018,2019'}
       val_years: {type: str, default: '2020'}
       test_years: {type: str, default: '2021'}      
-      n_trials: {type: str, default: '20'}
+      n_trials: {type: str, default: '2'}
       countries: {type: str, default: 'Portugal'}
-      max_epochs: {type: str, default: '500'}
+      max_epochs: {type: str, default: '3'}
       n_layers: {type: str, default: '2,6'}
       layer_sizes: {type: str, default: "128,256,512,1024,2048"}
       l_window: {type: str, default: '168,336,504,672'}
@@ -117,7 +117,7 @@ entry_points:
       train_years: {type: str, default: '2015,2016,2017,2018,2019'}
       val_years: {type: str, default: '2020'}
       test_years: {type: str, default: '2021'}      
-      max_epochs: {type: str, default: '500'}
+      max_epochs: {type: str, default: '3'}
       n_layers: {type: str, default: '1'}
       layer_sizes: {type: str, default: "100"}
       l_window: {type: str, default: '240'}
@@ -159,7 +159,7 @@ entry_points:
       train_years: {type: str, default: '2015,2016,2017,2018,2019'}
       val_years: {type: str, default: '2020'}
       test_years: {type: str, default: '2021'}
-      max_epochs: {type: str, default: '200'}
+      max_epochs: {type: str, default: '3'}
       n_layers: {type: str, default: '1'}
       layer_sizes: {type: str, default: "100"}
       l_window: {type: str, default: '240'}
@@ -169,7 +169,7 @@ entry_points:
       optimizer_name: {type: str, default: 'Adam'}
       batch_size: {type: str, default: '1024'}
       transfer_mode: {type: str, default: "0"}
-      n_estimators: {type: str, default: '5'}
+      n_estimators: {type: str, default: '3'}
       num_workers: {type: str, default: '2'}
       time_steps: {type: str, default: '168'}
     command: "python forecasting_model_ensemble.py \
@@ -222,11 +222,11 @@ entry_points:
       val_years: {type: str, default: '2020'}
       test_years: {type: str, default: '2021'}      
       time_steps: {type: str, default: '168'}
-    command: "python forecasting_model_naive.py \ 
-              --dir_in {dir_in} \ 
-              --countries {countries} \ 
-              --tgt_country {tgt_country} \ 
-              --train_years {train_years} \ 
-              --val_years {val_years} \ 
-              --test_years {test_years} \ 
+    command: "python forecasting_model_naive.py \
+              --dir_in {dir_in} \
+              --countries {countries} \
+              --tgt_country {tgt_country} \
+              --train_years {train_years} \
+              --val_years {val_years} \
+              --test_years {test_years} \
               --time_steps {time_steps} "

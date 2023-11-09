@@ -25,6 +25,12 @@ import shutil
 import tempfile
 import mlflow
 
+# get environment variables
+# from dotenv import load_dotenv
+# load_dotenv()
+# explicitly set MLFLOW_TRACKING_URI as it cannot be set through load_dotenv
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI")
+
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Globals ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 tmp_folder = None
 
@@ -78,10 +84,10 @@ def read_and_validate_input(series_csv: str = "../../RDN/Load_Data/2009-2019-glo
                         index_col=0,
                         parse_dates=True,
                         dayfirst=day_first)
-    print(ts.index)
+    # print(ts.index)
     ts.sort_index(ascending=True, inplace=True)
-    print(ts.index)
-    print(ts.index.sort_values())
+    # print(ts.index)
+    # print(ts.index.sort_values())
     if not ts.index.sort_values().equals(ts.index):
         raise DatesNotInOrder()
     elif not (len(ts.columns) == 1 and 
@@ -180,7 +186,7 @@ def save_results(country_ts, country_file_to_name):
         ts.to_csv(f"{tmp_folder}/{country}.csv")
         multiple_ts.append(ts)
         names.append(f"{tmp_folder}/{country}.csv")
-        print(names)
+        # print(names)
     return multiple_ts, names
 
 # country_ts, country_file_to_name = merge_country_csvs()
@@ -199,6 +205,8 @@ def save_results(country_ts, country_file_to_name):
 
 Επιπλέον, αφού οι σειρές αυτές δεν εμφανίζουν τάση, δεν χρειάζεται να πραγματοποιηθεί detrend.
 """
+
+outliers_dict = {}
 
 def remove_outliers(ts: pd.DataFrame, 
                     name: str = "Portugal", 
@@ -245,6 +253,8 @@ def remove_outliers(ts: pd.DataFrame,
     a = a[~a.index.duplicated(keep='first')]
     if print_removed: print(f"Removed outliers from {name}: {a.shape[0]} rows")
 
+    outliers_dict[name] = (a.shape[0], ts.shape[0])
+
 #     fig, ax = plt.subplots(figsize=(8,5))
 #     ax.plot(ts.index, ts['Load'], color='black', label = f'Load of {name}')
 #     ax.scatter(a.index, a['Load'], color='blue', label = 'Removed Outliers')
@@ -272,6 +282,13 @@ def read_csvs():
             ts = ts.asfreq('1H')
             result[name] = remove_outliers(ts, name)
             raw_result[name] = ts
+
+    for key, value in outliers_dict.items():
+        print(key, ' : ', value[0], ' | ', value[1])
+    
+    print(outliers_dict)
+
+    # import sys; sys.exit()
     return result, raw_result
 
 # result, raw_result = read_csvs()
@@ -353,6 +370,7 @@ https://ieeexplore.ieee.org/abstract/document/7781213. Αυτό γίνεται �
 
 Τα holidays θεωρούνται είτε Σάββατα(αν η πραγματική μέρα ειναι Παρασκευή) ή Κυριακές(σε κάθε άλλη περίπτωση)
 """
+impute_dict = {}
 
 def impute(ts: pd.DataFrame, 
            holidays, 
@@ -455,9 +473,12 @@ def impute(ts: pd.DataFrame,
     #We copy the time series so that we don't change it while iterating
     res = ts.copy()
     
+    imputed = 0
     for i, null_date in enumerate(null_dates):
         if leave_nan[i]: continue
         
+        imputed = imputed + 1
+
         #WN: Day of the week + hour/24 + minute/(24*60). Holidays are handled as
         #either Saturdays(if the real day is a Friday) or Sundays(in every other case)
         currWN = calendar.loc[null_date]['WN']
@@ -483,7 +504,9 @@ def impute(ts: pd.DataFrame,
 
     # merge callendar with res
     res_with_calendar = res.merge(calendar,left_index=True, right_index=True, how = 'inner')
-  
+    
+    impute_dict[ts.shape[0]] = imputed
+
     return res_with_calendar, null_dates
 
 def test_impute_function(country, result, max_thhr, a):
@@ -616,6 +639,8 @@ def store_with_local_time():
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Main ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 def etl(**kwargs):
+    
+    first_trial = False
 
     with mlflow.start_run(run_name='etl', nested=True) as etl_start:
         mlflow.set_tag("stage", "etl")
@@ -659,20 +684,42 @@ def etl(**kwargs):
                             country = pathlib.Path(name).stem #find country of csv (its name given the circumstances)
                         
                         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-                        if(os.path.exists(f"../preprocessed_data/{name}")):
-                            shutil.copyfile(f"../preprocessed_data/{name}", f"{preprocessed_tmpdir}/{name}")   
-                            print(f'File \"{name}\" already preprocessed')                         
-                            continue
+                        # if(os.path.exists(f"../preprocessed_data/{name}")):
+                        #     first_trial = False
+                        #     shutil.copyfile(f"../preprocessed_data/{name}", f"{preprocessed_tmpdir}/{name}")   
+                        #     print(f'File \"{name}\" already preprocessed')                         
+                        #     continue
+                        
                         # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
                         code = compile(f"holidays.{country}()", "<string>", "eval") #find country's holidays
                         holidays_ = eval(code)
                         res, null_dates = impute(result[f"{name}"], holidays_, 5000, 0.2, debug=False) # impute datasets and
 
+                        global impute_dict
+                        # get last entry added by impute function
+                        impute_key = list(impute_dict)[-1]
+
+                        # create new country-as-key entry in dict
+                        impute_dict[country] = (impute_key, impute_dict[impute_key])
+
+                        # remove previous entry
+                        impute_dict = {key:val for key, val in impute_dict.items() if key != impute_key}
+
+
                         print(f'Stored to "{ preprocessed_tmpdir }/{name}"')
                         logging.info(f'Stored to "{preprocessed_tmpdir}/{name}"')
                         res.to_csv(f"{preprocessed_tmpdir}/{name}") #store them on seperate folder
+                        
+                        if not os.path.exists('../preprocessed_data/'):
+                            first_trial = True 
+                            os.makedirs('../preprocessed_data/')
+                        
+                        if(first_trial):
+                            print(f'Stored to ../preprocessed_data/{name}')
+                            res.to_csv(f"../preprocessed_data/{name}") #store them on seperate folder
 
+                print(impute_dict)
                 # mlflow tags
                 print("\nUploading training csvs and metrics to MLflow server...")
                 logging.info("\nUploading training csvs and metrics to MLflow server...")
@@ -685,4 +732,5 @@ def etl(**kwargs):
 if __name__ == '__main__':
     print("\n=========== ETL =============")
     logging.info("\n=========== ETL =============")
+    mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)    
     etl()
