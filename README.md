@@ -4,7 +4,7 @@ The repository for load forecasting through Transfer Learning techniques.
 
 ## Installation
 
-This project is implemented in [MLFlow] (https://mlflow.org/docs/latest/index.html) to handle the different stages in the pipeline. Each stage can be run independently as an entry point, and its inputs and outputs are stored in its respected MLflow run file -- see **MLProject** file for details regarding the inputs of each entry point.
+This project is implemented in [MLFlow](https://mlflow.org/docs/latest/index.html) to handle the different stages in the pipeline. Each stage can be run independently as an entry point, and its inputs and outputs are stored in its respected MLflow run file -- see **MLProject** file for details regarding the inputs of each entry point.
 
 | Entrypoint |            Filename           |
 |:----------:|:-----------------------------:|
@@ -21,7 +21,7 @@ This project is implemented in [MLFlow] (https://mlflow.org/docs/latest/index.ht
 
 **model_utils.py** is a python file containing general-purpose functions used in more than one pipeline stages
 
-Use the package manager [pip] (https://pip.pypa.io/en/stable/) to install MLFlow.
+Use the package manager [pip](https://pip.pypa.io/en/stable/) to install MLFlow.
 ```bash
 pip install mlflow
 ```
@@ -38,7 +38,35 @@ Data must:
 
 ## Usage
 
-As mentioned, **MLProject** offers a wide range of parameters that should be tuned, with regards to each stage in pipeline.
+As mentioned, **MLProject** offers a wide range of parameters that should be tuned, with regards to each stage in pipeline. 
+While each entrypoint has its own parameters, **main** entrypoint contains all parameters required for any entrypoint, and distributes them accordingly:  
+
+| Parameters     | Type | Default Value              |
+|----------------|------|----------------------------|
+|     stages     | str  | 'all                       |
+| dir_in         | str  | '../original_data/'        |
+| local_tz       | bool | False                      |
+| src_countries  | str  | 'Portugal'                 |
+| tgt_countries  | str  | 'Portugal'                 |
+| seed           | str  | '42'                       |
+| train_years    | str  | '2015,2016,2017,2018,2019' |
+| val_years      | str  | '2020'                     |
+| test_years     | str  | '2021'                     |
+| n_trials       | str  | '2'                        |
+| max_epochs     | str  | '3'                        |
+| n_layers       | str  | '1'                        |
+| layer_sizes    | str  | "100"                      |
+| l_window       | str  | '240'                      |
+| f_horizon      | str  | '24'}                      |
+| l_rate         | str  | '0.0001'                   |
+| activation     | str  | 'ReLU'                     |
+| optimizer_name | str  | 'Adam'                     |
+| batch_size     | str  | '1024'                     |
+| transfer_mode  | str  | "0"                        |
+| num_workers    | str  | '2'                        |
+| tl_model_uri   | str  | None                       |
+| n_estimators   | str  | '3'                        |
+| test_case      | str  | '1'                        |
 
 **Example:** locally train a model in the Greek-Spanish dataset, apply AbO warm-start transfer learning on Italy and store in an experiment with name "full_pipeline":
 
