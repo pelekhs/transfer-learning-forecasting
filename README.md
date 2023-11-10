@@ -41,32 +41,33 @@ Data must:
 As mentioned, **MLProject** offers a wide range of parameters that should be tuned, with regards to each stage in pipeline. 
 While each entrypoint has its own parameters, **main** entrypoint contains all parameters required for any entrypoint, and distributes them accordingly:  
 
-| Parameters     | Type | Default Value              |
-|----------------|------|----------------------------|
-|     stages     | str  | 'all                       |
-| dir_in         | str  | '../original_data/'        |
-| local_tz       | bool | False                      |
-| src_countries  | str  | 'Portugal'                 |
-| tgt_countries  | str  | 'Portugal'                 |
-| seed           | str  | '42'                       |
-| train_years    | str  | '2015,2016,2017,2018,2019' |
-| val_years      | str  | '2020'                     |
-| test_years     | str  | '2021'                     |
-| n_trials       | str  | '2'                        |
-| max_epochs     | str  | '3'                        |
-| n_layers       | str  | '1'                        |
-| layer_sizes    | str  | "100"                      |
-| l_window       | str  | '240'                      |
-| f_horizon      | str  | '24'}                      |
-| l_rate         | str  | '0.0001'                   |
-| activation     | str  | 'ReLU'                     |
-| optimizer_name | str  | 'Adam'                     |
-| batch_size     | str  | '1024'                     |
-| transfer_mode  | str  | "0"                        |
-| num_workers    | str  | '2'                        |
-| tl_model_uri   | str  | None                       |
-| n_estimators   | str  | '3'                        |
-| test_case      | str  | '1'                        |
+|   Parameters   | Type |        Default Value       |                           Description                           |
+|:--------------:|:----:|:--------------------------:|:---------------------------------------------------------------:|
+|     stages     |  str |            'all            |    comma seperated entry point names to execute from pipeline   |
+|     stages     |  str |            'all'           |      comma-seperated containing entrypoint names to be run      |
+|     dir_in     |  str |     '../original_data/'    |        Folder path containing csv files used by the model       |
+|    local_tz    | bool |            False           |      flag if you want local (True) or UTC (False) timezone      |
+|  src_countries |  str |         'Portugal'         |          csv names from dir_in used by the source model         |
+|  tgt_countries |  str |         'Portugal'         |          csv names from dir_in used by the target model         |
+|      seed      |  str |            '42'            |            seed used to set random state to the model           |
+|   train_years  |  str | '2015,2016,2017,2018,2019' |              list of years to use for training set              |
+|    val_years   |  str |           '2020'           |             list of years to use for validation set             |
+|   test_years   |  str |           '2021'           |               list of years to use for testing set              |
+|    n_trials    |  str |             '2'            |        number of trials - different tuning oh hyperparams       |
+|   max_epochs   |  str |             '3'            |           range of number of epochs used by the model           |
+|    n_layers    |  str |             '1'            |           range of number of layers used by the model           |
+|   layer_sizes  |  str |            "100"           |          range of size of each layer used by the model          |
+|    l_window    |  str |            '240'           |  range of lookback window (input layer size) used by the model  |
+|    f_horizon   |  str |             '24'           | range of forecast horizon (output layer size) used by the model |
+|     l_rate     |  str |          '0.0001'          |             range of learning rate used by the model            |
+|   activation   |  str |           'ReLU'           |        activation functions experimented on by the model        |
+| optimizer_name |  str |           'Adam'           |             optimizers experimented on by the model             |
+|   batch_size   |  str |           '1024'           |             batch sizes experimented on by the model            |
+|  transfer_mode |  str |             "0"            |          indicator to use transfer learning techniques          |
+|   num_workers  |  str |             '2'            |       accelerator (cpu/gpu) processesors and threads used       |
+|  tl_model_uri  |  str |            None            |     uri path for accessing model used for transfer learning     |
+|  n_estimators  |  str |             '3'            |         number of estimators (models) used in ensembling        |
+|    test_case   |  str |             '1'            |             indicator of scenario that is being used            |
 
 **Example:** locally train a model in the Greek-Spanish dataset, apply AbO warm-start transfer learning on Italy and store in an experiment with name "full_pipeline":
 
