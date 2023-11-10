@@ -83,9 +83,9 @@ mlflow run . --env-manager=local -P stages='all'
 ```python
 class TestCase(IntEnum):
     NAIVE = 0
-    BENCHMARK = 1
-    ALL_FOR_ONE = 2 
-    CLUSTER_FOR_ONE = 3
+    BASELINE = 1
+    AbO = 2 
+    CbO = 3
 
 class Transfer(IntEnum):
     NO_TRANSFER = 0
@@ -93,6 +93,11 @@ class Transfer(IntEnum):
 
 ```
 
+ The execution of a single entrypoint can be done using the "-e" flag.
+ **Example:** execute "optuna" entrypoint and store run in an experiment with name "optuna_entrypoint": 
+ ```python
+ mlflow run . --env-manager=local -e optuna --experiment-name=optuna_entrypoint
+```
 
 ## Contributing
 
