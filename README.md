@@ -34,6 +34,7 @@ Data must:
 * all be in a single directory provided at user input (dir_in) 
 * be in csv format 
 * contain one datetime column (named "Start") and one column containing energy load data (named "Load")
+* be in 1-hour interval
 * be named after the country name (e.g Greece) or code (e.g GR) they represent
 
 ## Usage
